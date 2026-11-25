@@ -85,6 +85,20 @@ html, body {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  min-width: 0;
+}
+
+/* Keep long paths inside callout banners strictly contained */
+.callout {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+.callout > span:not(.tag) {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .row {
@@ -320,7 +334,7 @@ canvas#stage {
 }
 .frame-row {
   display: grid;
-  grid-template-columns: 12px 5ch 1fr auto;
+  grid-template-columns: 12px 5.5ch 1fr auto;
   align-items: center;
   gap: 0.6ch;
   padding: 2px 0.6ch;
@@ -329,8 +343,20 @@ canvas#stage {
   font-size: 12px;
   white-space: nowrap;
 }
+.frame-row .frame-meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.frame-row .frame-ev {
+  color: var(--value);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .frame-row:first-child { border-top: 0; }
 .frame-row:hover { background: var(--action-dim); }
+.frame-row.multi-selected { background: rgba(0, 255, 255, 0.14); color: var(--text); }
 .frame-row.selected { background: var(--toggle-on); color: var(--text); }
 
 /* Right Dock Mode Tabs: [ CROP ] | [ DEVELOP ] */
@@ -366,28 +392,25 @@ canvas#stage {
 }
 .dock-pane[hidden] { display: none; }
 
-/* Live Develop Preview Overlay inside Center Viewport */
+/* Live Develop Preview Overlay inside Center Viewport (supports 60fps zoom & pan) */
 .dev-stage-wrap {
   position: absolute;
   inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
   background: #050505;
-  padding: 18px;
   overflow: hidden;
   z-index: 4;
+  cursor: grab;
 }
 .dev-stage-wrap[hidden] { display: none; }
+.dev-stage-wrap.panning { cursor: grabbing; }
+.dev-stage-wrap.wb-pick { cursor: crosshair; }
+.dev-stage-wrap.paint-mode { cursor: none; }
+.dev-stage-wrap.paint-mode.panning { cursor: grabbing; }
 #dev-canvas {
-  max-width: 100%;
-  max-height: 100%;
-  object-fit: contain;
-  border: 1px solid var(--line-subtle);
-  background: #000;
-}
-.dev-stage-wrap.wb-pick #dev-canvas {
-  cursor: crosshair;
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: #050505;
 }
 .dev-hud {
   position: absolute;

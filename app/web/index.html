@@ -30,7 +30,8 @@
     <div class="right">
       <button id="btn-del-raw" class="danger" title="Delete full raw holder scan after exporting frames">DEL RAW</button>
       <button id="btn-save-layout" title="Save frame layout (Ctrl+S)">SAVE <span class="key">^S</span></button>
-      <button id="btn-export-top" class="btn-primary" title="Export cropped 16-bit TIFFs (E)">EXPORT <span class="key">E</span></button>
+      <button id="btn-export-top" class="btn-primary" title="Export selected frames (or current frame in Develop) (E)">EXP SEL <span class="key">E</span></button>
+      <button id="btn-export-all-top" title="Export all frames on roll (Shift+E)">ALL <span class="key">⇧E</span></button>
     </div>
   </header>
 
@@ -108,7 +109,7 @@
         </div>
         <div class="panel-body">
           <div class="row">
-            <button id="btn-detect" class="btn-primary grow">AUTO-DETECT <span class="key">D</span></button>
+            <button id="btn-detect" class="btn-primary grow" title="Auto-detect strips & frames (Shift+A)">AUTO-DETECT <span class="key">⇧A</span></button>
             <button id="btn-clear-frames" class="danger" title="Clear all frames">CLEAR</button>
           </div>
           <div class="range-row">
@@ -128,7 +129,8 @@
           </div>
           <div class="row">
             <button id="tog-skip-empty" aria-pressed="true" class="grow" title="Skip unloaded empty glass segments during detect">SKIP EMPTY</button>
-            <button id="btn-draw-mode" aria-pressed="false" class="grow" title="Draw manual frame box (B)">DRAW BOX <span class="key">B</span></button>
+            <button id="btn-select-mode" aria-pressed="false" class="grow" title="Drag marquee box to select multiple frames (V)">BOX SEL <span class="key">V</span></button>
+            <button id="btn-draw-mode" aria-pressed="false" class="grow" title="Draw manual frame box (B)">DRAW <span class="key">B</span></button>
           </div>
         </div>
       </section>
@@ -141,7 +143,22 @@
         <div class="panel-body">
           <div class="field">
             <label for="in-outdir">TARGET DIR</label>
-            <input id="in-outdir" type="text" value="" spellcheck="false" title="Local folder or mounted NAS path">
+            <input id="in-outdir" type="text" value="" spellcheck="false" title="Archive root (creates rolls/<roll>/ and events/<slug>/)">
+          </div>
+          <div class="field">
+            <label for="in-start-num">START #</label>
+            <div class="row">
+              <input id="in-start-num" type="number" min="1" max="999" value="1" title="Starting frame number (e.g. 49 for Holder B of a 72-frame roll)" style="width:7ch;flex:0 0 7ch;">
+              <button id="tog-rev-order" aria-pressed="false" class="grow" title="Reverse frame numbering order for strips loaded tail-first">REV ORDER</button>
+            </div>
+          </div>
+          <div class="field">
+            <label for="in-event-mode">EVENTS</label>
+            <select id="in-event-mode" title="How tagged event/carousel subfolders under events/ are populated">
+              <option value="symlink" selected>SYMLINK (ZERO DUP)</option>
+              <option value="copy">COPY JPG (PORTABLE)</option>
+              <option value="off">OFF (ROLLS ONLY)</option>
+            </select>
           </div>
           <div class="row">
             <button id="tog-exp-ir" aria-pressed="true" class="grow" title="Apply V2 16-bit IR dust cleaning + grain match">IR CLEAN</button>
@@ -168,7 +185,10 @@
             <label for="in-stock">FILM STOCK</label>
             <input id="in-stock" type="text" value="" placeholder="e.g. Kodak Gold 200" spellcheck="false">
           </div>
-          <button id="btn-export" class="btn-primary">EXPORT ALL FRAMES <span class="key">E</span></button>
+          <div class="row">
+            <button id="btn-export" class="btn-primary grow" title="Export selected frames in Crop mode or current frame in Develop mode (E)">EXPORT SEL <span class="key">E</span></button>
+            <button id="btn-export-all" title="Export all frames in roll (Shift+E)">ALL <span class="key">⇧E</span></button>
+          </div>
           <div id="export-status" class="callout info" hidden>
             <span class="tag">INFO</span>
             <span id="export-status-text"></span>
@@ -185,16 +205,16 @@
         <span class="tab">VIEWPORT</span>
         <span id="scan-meta" class="dim" style="font-size:12px;">NO SCAN LOADED</span>
         <div class="right-tools">
-          <button id="btn-view-rot" title="Rotate viewport 90 deg for landscape inspection (L)">ROT VIEW <span class="key">L</span></button>
-          <button id="btn-prev-frame" title="Previous frame (P)">PREV <span class="key">P</span></button>
-          <button id="btn-next-frame" title="Next frame (N)">NEXT <span class="key">N</span></button>
+          <button id="btn-view-rot" title="Rotate viewport 90 deg for landscape inspection (O / Shift+O)">ROT VIEW <span class="key">O</span></button>
+          <button id="btn-prev-frame" title="Previous frame (H / K)">PREV <span class="key">H</span></button>
+          <button id="btn-next-frame" title="Next frame (L / J)">NEXT <span class="key">L</span></button>
           <button id="btn-zoom-sel" title="Zoom selected frame to fit (Z)">ZOOM <span class="key">Z</span></button>
-          <button id="btn-fit" title="Fit full holder to viewport (F)">FIT <span class="key">F</span></button>
-          <button id="btn-100" title="Zoom 100% (1)">1:1 <span class="key">1</span></button>
-          <button id="btn-undo" title="Undo last edit (Ctrl+Z)">UNDO <span class="key">^Z</span></button>
-          <button id="btn-redo" title="Redo edit (Ctrl+Y / Ctrl+Shift+Z)" disabled>REDO <span class="key">^Y</span></button>
+          <button id="btn-fit" title="Fit to viewport (F)">FIT <span class="key">F</span></button>
+          <button id="btn-100" title="Zoom 1:1 native pixels (0)">1:1 <span class="key">0</span></button>
+          <button id="btn-undo" title="Undo last edit (U / Ctrl+Z)">UNDO <span class="key">U</span></button>
+          <button id="btn-redo" title="Redo edit (Shift+U / Ctrl+Y)" disabled>REDO <span class="key">⇧U</span></button>
           <button id="btn-add-grid" title="Stamp strip grid on active strip (G)">+ GRID <span class="key">G</span></button>
-          <button id="btn-del-frame" class="danger" title="Delete selected frame (Del)">DEL <span class="key">DEL</span></button>
+          <button id="btn-del-frame" class="danger" title="Delete selected frame (D · Shift+D for whole selection)">DEL <span class="key">D</span></button>
         </div>
       </div>
       <div id="viewport-wrap" class="viewport-wrap mode-select">
@@ -206,6 +226,8 @@
             <span id="dev-hud-frame" class="val">--</span>
             <span class="dim">·</span>
             <span id="dev-hud-prof" class="key">FRONTIER</span>
+            <span class="dim">·</span>
+            <span id="dev-hud-zoom" class="val">FIT</span>
             <span class="dim">·</span>
             <span id="dev-hud-state" class="dim">READY</span>
           </div>
@@ -252,21 +274,30 @@
               <dt>EXPORT</dt><dd id="kv-rot90" class="val">0 deg</dd>
               <dt>INSET</dt><dd id="kv-ins" class="val">0.0%</dd>
             </dl>
-            <div class="nudge-grid" title="Nudge selected frame (hold Shift for whole strip)">
-              <button data-nudge="left" title="Left (ArrowLeft)">&larr;</button>
-              <button data-nudge="right" title="Right (ArrowRight)">&rarr;</button>
-              <button data-nudge="up" title="Up (ArrowUp)">&uarr;</button>
-              <button data-nudge="down" title="Down (ArrowDown)">&darr;</button>
-              <button data-nudge="ccw" title="Tilt -0.2 deg ([)">[</button>
-              <button data-nudge="cw" title="Tilt +0.2 deg (])">]</button>
+            <div class="nudge-grid" title="Nudge border (Alt+H/J/K/L · Alt+Shift = whole selection)">
+              <button data-nudge="left" title="Left (Alt+H · Alt+Shift=sel)">&larr;</button>
+              <button data-nudge="right" title="Right (Alt+L · Alt+Shift=sel)">&rarr;</button>
+              <button data-nudge="up" title="Up (Alt+K · Alt+Shift=sel)">&uarr;</button>
+              <button data-nudge="down" title="Down (Alt+J · Alt+Shift=sel)">&darr;</button>
+              <button data-nudge="ccw" title="Tilt -0.1 deg (Q · Shift=sel)">[</button>
+              <button data-nudge="cw" title="Tilt +0.1 deg (W · Shift=sel)">]</button>
             </div>
             <div class="row">
-              <button id="btn-exp-ccw" class="grow" title="Rotate exported frame 90 deg CCW (Q)">OUT -90 <span class="key">Q</span></button>
-              <button id="btn-exp-cw" class="grow" title="Rotate exported frame 90 deg CW (W)">OUT +90 <span class="key">W</span></button>
+              <button id="btn-exp-ccw" class="grow" title="Rotate exported frame 90 deg CCW (Q in Develop)">OUT -90</button>
+              <button id="btn-exp-cw" class="grow" title="Rotate exported frame 90 deg CW (W in Develop)">OUT +90</button>
             </div>
             <div class="row">
               <button id="btn-dup-frame" class="grow" title="Duplicate selected frame downward">DUP BELOW</button>
               <button id="btn-rot-reset" title="Reset frame angle to 0">0 DEG</button>
+            </div>
+            <div class="field">
+              <label for="in-frame-event">EVENT</label>
+              <input id="in-frame-event" type="text" list="event-suggestions" value="" placeholder="e.g. 2026-11_wat-arun" spellcheck="false" title="Event/carousel folder slug (comma-separated for multiple)">
+            </div>
+            <div class="row">
+              <button id="btn-ev-from" class="grow" title="Tag from selected frame through end of roll">TAG FROM #</button>
+              <button id="btn-ev-strip" class="grow" title="Tag all frames on this strip">TAG STRIP</button>
+              <button id="btn-ev-clear" title="Clear event tag on selected frame">CLR</button>
             </div>
           </div>
         </section>
@@ -313,9 +344,6 @@
             <div class="row">
               <button id="dev-autowb" aria-pressed="true" class="grow" title="Per-frame density White Balance">AUTO WB</button>
               <button id="dev-wb-pick" aria-pressed="false" class="grow" title="Click a neutral gray pixel in preview to set Temp/Tint">WB PICK</button>
-            </div>
-            <div class="row">
-              <button id="dev-ir-prev" aria-pressed="false" class="grow" title="Preview V2 IR dust cleaning live (slightly slower)">IR PREV</button>
               <button id="dev-before" aria-pressed="false" class="grow" title="Compare raw proof vs developed (hold Backslash)">BEFORE <span class="key">\</span></button>
             </div>
             <div class="range-row">
@@ -323,12 +351,17 @@
               <input id="dev-exp" type="range" min="-2.0" max="2.0" step="0.05" value="0.0">
               <span id="val-dev-exp" class="readout">0.00</span>
             </div>
-            <div class="range-row">
+            <div class="range-row" title="RA-4 paper grade S-curve contrast around midtones">
               <label for="dev-con">CONTRAST</label>
               <input id="dev-con" type="range" min="0.60" max="1.60" step="0.02" value="1.00">
               <span id="val-dev-con" class="readout">1.00</span>
             </div>
-            <div class="range-row">
+            <div class="range-row" title="Recover bright skies/lamps (-) or boost upper-tone sparkle (+) from 16-bit highlight shoulder">
+              <label for="dev-hi">HIGHLIGHTS</label>
+              <input id="dev-hi" type="range" min="-1.00" max="1.00" step="0.05" value="0.00">
+              <span id="val-dev-hi" class="readout">0.00</span>
+            </div>
+            <div class="range-row" title="Shadow-toe lift (+) or crush (-) without shifting highlights">
               <label for="dev-blk">BLACKS</label>
               <input id="dev-blk" type="range" min="-0.40" max="0.40" step="0.02" value="0.00">
               <span id="val-dev-blk" class="readout">0.00</span>
@@ -348,20 +381,24 @@
               <input id="dev-sat" type="range" min="0.0" max="1.8" step="0.05" value="1.00">
               <span id="val-dev-sat" class="readout">1.00</span>
             </div>
-            <div class="range-row">
+            <div class="range-row" title="Smooth color speckle noise in Cb/Cr while keeping luminance edges sharp">
               <label for="dev-cnr">CHROMA NR</label>
               <input id="dev-cnr" type="range" min="0.0" max="1.0" step="0.05" value="0.55">
               <span id="val-dev-cnr" class="readout">55%</span>
             </div>
-            <div class="range-row">
+            <div class="range-row" title="Edge-preserving brightness smoothing (tames CCD/grain noise, stronger in shadows)">
               <label for="dev-lnr">LUMA NR</label>
               <input id="dev-lnr" type="range" min="0.0" max="1.0" step="0.05" value="0.15">
               <span id="val-dev-lnr" class="readout">15%</span>
             </div>
-            <div class="range-row">
+            <div class="range-row" title="Compensate V750 flatbed optical softness on real edges (set 0% for pure smoothing)">
               <label for="dev-shp">SHARPEN</label>
               <input id="dev-shp" type="range" min="0.0" max="1.0" step="0.05" value="0.25">
               <span id="val-dev-shp" class="readout">25%</span>
+            </div>
+            <div class="row">
+              <button id="dev-copy-look" class="grow" title="Yank/Copy current frame develop settings (Y / Ctrl+C)">YANK <span class="key">Y</span></button>
+              <button id="dev-paste-look" class="grow" title="Paste develop settings (P / Ctrl+V · Shift+P for whole selection)" disabled>PASTE <span class="key">P</span></button>
             </div>
             <div class="row">
               <button id="dev-apply-strip" class="grow" title="Copy current look to all frames on this strip">APPLY STRIP</button>
@@ -376,16 +413,69 @@
 
         <section class="panel">
           <div class="panel-head">
+            <span class="tab">IR DUST</span>
+            <span id="dev-ir-shift-readout" class="val" style="font-size:11px;margin-left:auto;padding-right:0.6ch;">SHIFT: AUTO</span>
+          </div>
+          <div class="panel-body">
+            <div class="row">
+              <button id="dev-ir-prev" aria-pressed="true" class="grow" title="Preview V2 IR dust cleaning live in Develop mode">IR CLEAN</button>
+              <button id="dev-ir-mask" aria-pressed="false" class="grow" title="Overlay aligned hardware IR dust mask (synced with M)">IR MASK <span class="key">M</span></button>
+            </div>
+            <div class="range-row" title="IR dust detection sensitivity (default 0.50)">
+              <label for="dev-ir-sens">IR SENS</label>
+              <input id="dev-ir-sens" type="range" min="0.10" max="0.95" step="0.05" value="0.50">
+              <span id="val-dev-ir-sens" class="readout">0.50</span>
+            </div>
+            <div class="range-row" title="Dust mask halo/smoothing dilation radius in native pixels (-1 = AUTO, default 3px at 3200 DPI)">
+              <label for="dev-ir-dilate">IR RADIUS</label>
+              <input id="dev-ir-dilate" type="range" min="-1" max="6" step="1" value="-1">
+              <span id="val-dev-ir-dilate" class="readout">AUTO</span>
+            </div>
+            <div class="row">
+              <button id="dev-ir-autoshift" aria-pressed="true" class="grow" title="Auto-align RGB<->IR optical shift (+/-6 px); turn off for manual override">AUTO SHIFT</button>
+              <label for="dev-ir-dx" class="dim" style="font-size:11px;">X</label>
+              <input id="dev-ir-dx" type="number" min="-8" max="8" step="1" value="0" style="width:5.5ch;flex:0 0 5.5ch;" disabled title="Manual RGB<->IR X shift (native px)">
+              <label for="dev-ir-dy" class="dim" style="font-size:11px;">Y</label>
+              <input id="dev-ir-dy" type="number" min="-8" max="8" step="1" value="0" style="width:5.5ch;flex:0 0 5.5ch;" disabled title="Manual RGB<->IR Y shift (native px)">
+            </div>
+            <div class="row">
+              <button id="dev-ir-paint" aria-pressed="false" class="grow" title="Paint manual heal spots/scratches into IR mask (B · Alt to erase · Space+drag to pan)">HEAL <span class="key">B</span></button>
+              <button id="dev-ir-erase" aria-pressed="false" title="Erase/protect areas from IR dust mask (or hold Alt while painting)">ERASE</button>
+              <button id="dev-ir-clear-spots" class="danger" title="Clear all manual heal spots on this frame">CLR</button>
+            </div>
+            <div class="range-row" title="Manual heal brush radius in native scan pixels ([ / ] in Develop)">
+              <label for="dev-ir-brush">BRUSH</label>
+              <input id="dev-ir-brush" type="range" min="3" max="80" step="1" value="14">
+              <span id="val-dev-ir-brush" class="readout">14px</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
             <span class="tab">FRAME ORIENTATION &amp; STEP</span>
           </div>
           <div class="panel-body">
             <div class="row">
-              <button id="dev-prev" class="grow">PREV <span class="key">P</span></button>
-              <button id="dev-next" class="grow">NEXT <span class="key">N</span></button>
+              <button id="dev-prev" class="grow">PREV <span class="key">H</span></button>
+              <button id="dev-next" class="grow">NEXT <span class="key">L</span></button>
             </div>
             <div class="row">
               <button id="dev-rot-ccw" class="grow">OUT -90 <span class="key">Q</span></button>
               <button id="dev-rot-cw" class="grow">OUT +90 <span class="key">W</span></button>
+            </div>
+            <div class="row">
+              <button id="dev-fit" class="grow" title="Fit developed frame to viewport (F)">FIT <span class="key">F</span></button>
+              <button id="dev-100" class="grow" title="Inspect true 1:1 native scan pixels & grain (0 / Double-click)">1:1 HD <span class="key">0</span></button>
+            </div>
+            <div class="field">
+              <label for="dev-frame-event">EVENT</label>
+              <input id="dev-frame-event" type="text" list="event-suggestions" value="" placeholder="e.g. 2026-11_wat-arun" spellcheck="false" title="Event/carousel folder slug (comma-separated for multiple)">
+            </div>
+            <div class="row">
+              <button id="dev-ev-from" class="grow" title="Tag from selected frame through end of roll">TAG FROM #</button>
+              <button id="dev-ev-strip" class="grow" title="Tag all frames on this strip">TAG STRIP</button>
+              <button id="dev-ev-clear" title="Clear event tag on selected frame">CLR</button>
             </div>
           </div>
         </section>
@@ -396,18 +486,21 @@
   <!-- BOTTOM KEYBOARD HINT BAR -->
   <footer class="statusbar">
     <span><span class="key">TAB</span> CROP/DEV</span>
-    <span><span class="key">L</span> ROT VIEW</span>
-    <span><span class="key">N/P</span> STEP FRAME</span>
-    <span><span class="key">Q/W</span> OUT 90</span>
-    <span><span class="key">\</span> BEFORE/AFTER</span>
-    <span><span class="key">I</span> POSITIVE</span>
-    <span><span class="key">M</span> IR DUST</span>
-    <span><span class="key">^Z/^Y</span> UNDO/REDO</span>
-    <span><span class="key">E</span> EXPORT</span>
+    <span><span class="key">H/L</span> FRAME (⇧EXT)</span>
+    <span><span class="key">ALT+HJKL</span> MOVE (⇧SEL)</span>
+    <span><span class="key">1-4/X</span> STRIP</span>
+    <span><span class="key">V</span> BOX SEL</span>
+    <span><span class="key">Q/W</span> TILT/ROT</span>
+    <span><span class="key">B</span> BOX/HEAL</span>
+    <span><span class="key">Y/P</span> YANK/PASTE</span>
+    <span><span class="key">U/⇧U</span> UNDO</span>
+    <span><span class="key">0/F</span> 1:1/FIT</span>
+    <span><span class="key">E/⇧E</span> EXP</span>
     <span id="status-msg" class="right">STANDALONE · NO LLM REQUIRED</span>
   </footer>
 </div>
 
+<datalist id="event-suggestions"></datalist>
 <div id="toast" class="toast" hidden></div>
 <script src="/app.js"></script>
 </body>

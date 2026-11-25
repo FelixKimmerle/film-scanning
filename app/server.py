@@ -268,6 +268,25 @@ def _safe_scan_path(filename: str) -> Path:
     return p
 
 
+def _list_existing_events(archive_root: Path) -> list[str]:
+    events_root = archive_root.expanduser() / "events"
+    if not events_root.is_dir():
+        return []
+    found: set[str] = set()
+    try:
+        for d in events_root.rglob("*"):
+            if not d.is_dir():
+                continue
+            rel = d.relative_to(events_root).as_posix()
+            # Include leaf event folders (or any folder directly containing files/links)
+            has_direct_files = any(not c.is_dir() for c in d.iterdir())
+            if has_direct_files or d.parent == events_root:
+                found.add(rel)
+    except OSError:
+        return []
+    return sorted(found)
+
+
 class CockpitHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -287,11 +306,20 @@ class CockpitHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
-    def _send_bytes(self, data: bytes, ctype: str, cache: str = "no-store") -> None:
+    def _send_bytes(
+        self,
+        data: bytes,
+        ctype: str,
+        cache: str = "no-store",
+        extra_headers: dict[str, str] | None = None,
+    ) -> None:
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", cache)
+        if extra_headers:
+            for k, v in extra_headers.items():
+                self.send_header(k, str(v))
         self.end_headers()
         self.wfile.write(data)
 
@@ -322,8 +350,15 @@ class CockpitHandler(BaseHTTPRequestHandler):
                         "job": job_dict,
                         "default_export_dir": str(EXPORTS_DIR),
                         "scans_dir": str(SCANS_DIR),
+                        "existing_events": _list_existing_events(EXPORTS_DIR),
                     }
                 )
+                return
+
+            if path == "/api/archive/events":
+                raw_dir = qs.get("out_dir", [str(EXPORTS_DIR)])[0]
+                target = Path(raw_dir).expanduser() if raw_dir.strip() else EXPORTS_DIR
+                self._send_json({"events": _list_existing_events(target)})
                 return
 
             if path == "/api/scans":
@@ -472,9 +507,11 @@ class CockpitHandler(BaseHTTPRequestHandler):
                         film_base = tuple(float(v) for v in base_raw[:3]) if (isinstance(base_raw, list) and len(base_raw) >= 3) else None
                         film_type = INVERT_MODES.get(str(body.get("film_type", "color_neg")), 1)
                         apply_ir = bool(body.get("apply_ir_clean", False))
+                        show_ir_mask = bool(body.get("show_ir_mask", False))
                         ir_sens = float(body.get("ir_sensitivity", 0.5))
-                        max_dim = min(1600, max(256, int(body.get("max_dim", 1050))))
-                        rgb8 = tiff_bridge.develop_frame_preview(
+                        req_dim = int(body.get("max_dim", 1050))
+                        max_dim = 0 if req_dim <= 0 else min(4096, max(256, req_dim))
+                        rgb8, ir_stats = tiff_bridge.develop_frame_preview(
                             scan_path,
                             frame,
                             dev=dev,
@@ -483,10 +520,22 @@ class CockpitHandler(BaseHTTPRequestHandler):
                             apply_ir_clean=apply_ir,
                             ir_sensitivity=ir_sens,
                             film_type=film_type,
+                            show_ir_mask=show_ir_mask,
+                            return_stats=True,
                         )
                         bio = io.BytesIO()
                         Image.fromarray(rgb8, mode="RGB").save(bio, format="JPEG", quality=91)
-                        self._send_bytes(bio.getvalue(), "image/jpeg", cache="no-store")
+                        self._send_bytes(
+                            bio.getvalue(),
+                            "image/jpeg",
+                            cache="no-store",
+                            extra_headers={
+                                "X-IR-Shift-X": str(ir_stats["shift_x"]),
+                                "X-IR-Shift-Y": str(ir_stats["shift_y"]),
+                                "X-IR-Dust-Px": str(ir_stats["dust_px"]),
+                                "X-IR-Auto-Dilate": str(ir_stats["auto_dilate"]),
+                            },
+                        )
                         return
                     if action == "delete":
                         lp = SCANS_DIR / f"{scan_path.name}.layout.json"
@@ -520,15 +569,21 @@ class CockpitHandler(BaseHTTPRequestHandler):
                 jpg_max_dim = int(body.get("jpg_max_dim", 0))
                 camera = str(body.get("camera", ""))
                 film_stock = str(body.get("film_stock", ""))
+                start_index = max(1, int(body.get("start_index", 1)))
+                reverse_order = bool(body.get("reverse_order", False))
+                archive_layout = bool(body.get("archive_layout", True))
+                event_link_mode = str(body.get("event_link_mode", "symlink"))
                 if not (export_raw_tiff or export_dev_tiff or export_dev_jpg):
                     raise ValueError("Enable at least one export format (RAW TIFF, DEV TIFF, or DEV JPG)")
 
-                target_sub = out_dir / ("".join(c if (c.isalnum() or c in "-_") else "_" for c in roll_name).strip("_") or "roll")
+                export_root = out_dir if archive_layout else (
+                    out_dir / ("".join(c if (c.isalnum() or c in "-_") else "_" for c in roll_name).strip("_") or "roll")
+                )
                 t0 = time.perf_counter()
-                exported = tiff_bridge.export_frames_v2(
+                exp_res = tiff_bridge.export_frames_v2(
                     src_path=scan_path,
                     frames=frames,
-                    out_dir=target_sub,
+                    out_dir=export_root,
                     roll_name=roll_name,
                     film_base=film_base,
                     apply_ir_clean=apply_ir,
@@ -541,15 +596,23 @@ class CockpitHandler(BaseHTTPRequestHandler):
                     jpg_max_dim=jpg_max_dim,
                     camera=camera,
                     film_stock=film_stock,
+                    start_index=start_index,
+                    reverse_order=reverse_order,
+                    archive_layout=archive_layout,
+                    event_link_mode=event_link_mode,
                 )
                 elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 1)
+                exported_files = exp_res["files"]
                 self._send_json(
                     {
                         "ok": True,
-                        "out_dir": str(target_sub),
-                        "count": len(exported),
+                        "out_dir": exp_res["roll_dir"],
+                        "events_root": exp_res.get("events_root"),
+                        "events_updated": exp_res.get("events_updated", []),
+                        "manifest": exp_res.get("manifest"),
+                        "count": len(exported_files),
                         "elapsed_ms": elapsed_ms,
-                        "files": exported,
+                        "files": exported_files,
                     }
                 )
                 return

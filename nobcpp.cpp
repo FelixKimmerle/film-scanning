@@ -6,6 +6,7 @@ int main(int argc, char** argv)
 
     nob::Build b(argc, argv);
     b.flags.std = 20;
+    b.flags.compile_flags.push_back("-pthread");
 
     auto tiff = b.pkg_config("libtiff-4");
 

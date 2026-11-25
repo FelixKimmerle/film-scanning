@@ -69,26 +69,42 @@ sudo dnf install gcc-c++ libtiff-devel pkgconf-pkg-config python3 python3-numpy 
 
 1. **Scan Holder:** Pick `SILVERFAST 9` (default) or `VUESCAN 9`, choose format (`35MM HALF-FRAME` or `35MM FULL-FRAME`), film type, DPI (`2400` optimal / `3200` max), `IR CHANNEL` (on for C-41/E-6, auto-off for silver B&W), and click **SCAN HOLDER**.
 2. **Auto-Detect & Inspect:** Auto-detect runs automatically when a scan opens (or press `D`). Press `I` for a quick optical-density positive preview, `L` to flip the viewport into landscape, and step through frames with `N`/`P` at crisp `1:1 HD` native resolution.
-3. **Fine-Tune Borders:** Drag edges/corners directly on the exported box, hold `Shift` to move an entire strip together, toggle `M` to preview the hardware IR dust mask and dial in `IR SENS`, and tag any per-frame 90° export orientation with `Q`/`W`.
-4. **Export 16-Bit TIFFs:** Set your target directory (local folder or mounted NAS), choose `IR CLEAN` / `GAMMA 2.2` / `+ POSITIVE JPG PROOFS`, and press `E`. Once verified, click `DEL RAW` (two-click safety confirm) to free disk space from the multi-GB master holder scan.
+3. **Fine-Tune Borders & Tag Events:** Drag edges/corners directly on the exported box, hold `Shift` to move an entire strip together, toggle `M` to preview the hardware IR dust mask and dial in `IR SENS`, and tag per-frame 90° export orientation with `Q`/`W`. Assign optional event/carousel folder tags (`EVENT` + `TAG FROM #` / `TAG STRIP`) in either `CROP` or `DEVELOP` mode (press `Tab` to switch).
+4. **Develop & Export Archive:** In the `DEVELOP` tab, pick a print profile (`FRONTIER`, `NORITSU`, `NATURAL`, `WARM`, `B&W CLASSIC`), tweak exposure/WB/denoise/sharpen with live preview (`\` hold Before/After), and press `E` to export into the dual-view archive layout:
+   ```text
+   <TARGET DIR>/
+   ├── rolls/<roll_id>/
+   │   ├── raw_16bit/        # 16-bit linear RAW TIFFs (Lightroom + NLP / Darktable)
+   │   ├── developed_16bit/  # Optional 16-bit developed positive TIFFs
+   │   ├── jpg/              # Developed JPEGs with EXIF Roll + Event + Camera + Stock
+   │   └── roll.json         # Merged manifest across Holder A (1–48) & Holder B (49–72)
+   └── events/<event_slug>/
+       └── <roll_id>_NNN.jpg # Relative symlink (zero dup) or portable JPEG copy, sorted in roll order
+   ```
+   Set `START #` (e.g. `49`) for Holder B of a 72-frame half-frame roll, or toggle `REV ORDER` if strips were loaded tail-first. Once verified, click `DEL RAW` (two-click safety confirm) to free disk space from the multi-GB master holder scan.
 
-### Keyboard Shortcuts
+### Keyboard Shortcuts (Helix / Vim-Inspired)
 
 | Key | Action |
 |---|---|
-| `L` / `Shift+L` | Rotate viewport ±90° (landscape inspection mode) |
-| `N` / `P` | Step to Next / Previous frame (auto-zoomed) |
-| `Z` / Double-click | Zoom selected frame to fit |
-| `F` / `1` | Fit full holder / Zoom 1:1 |
-| `Q` / `W` | Rotate exported frame orientation -90° / +90° |
-| `Arrows` / `Shift+Arrows` | Nudge selected frame / entire strip (screen-aligned) |
-| `[` / `]` | Tilt frame -0.2° / +0.2° (`Shift` for ±1.0°) |
-| `I` | Toggle positive preview |
-| `M` / `R` | Toggle IR dust mask overlay / raw 16-bit IR view |
-| `D` / `B` / `G` | Auto-detect / Draw manual box / Stamp strip grid |
-| `Del` / `Backspace` | Delete selected frame |
-| `Ctrl+Z` / `Ctrl+Y` | Undo / Redo (100-step history) |
-| `Ctrl+S` / `E` | Save layout JSON / Export all frames (16-bit TIFF) |
+| `Tab` | 1:1 pixel-locked switch between `CROP` and `DEVELOP` mode |
+| `h` / `k` & `l` / `j` | Previous / Next frame in **both** `CROP` & `DEVELOP` (`Shift` extends selection in `CROP`; Arrows also work) |
+| `Alt + h/j/k/l` | Fine nudge frame Left/Down/Up/Right in `CROP` (`Alt+Shift` = whole selection) |
+| `q` / `w` | Tilt `-0.1°` / `+0.1°` in `CROP` (`Shift` = selection, `Alt` = `±0.5°`) · Rotate `±90°` in `DEVELOP` (`Shift` = selection) |
+| `1`–`4` / `x` | Select Strip 1–4 / Select active frame's whole strip (`Alt+Shift+HJKL` moves strip) |
+| `%` (`^A`) / `,` / `v` | Select all frames / Collapse selection to primary / Toggle Box Marquee Select |
+| `b` | Draw manual frame box (`CROP`) · Toggle IR Heal Brush (`DEVELOP`, hold `Alt` to erase) |
+| `[` / `]` | Alias tilt in `CROP` · Shrink / grow Heal Brush size in `DEVELOP` (`Shift` `±10px`) |
+| `y` / `p` (`^C`/`^V`) | Yank (copy) / Paste Develop Look (`p` pastes to selection in `CROP`, `Shift+P` pastes to selection in `DEVELOP`) |
+| `u` / `U` (`^Z`/`^Y`) | Undo / Redo (100-step history) |
+| `0` / `f` / `z` | Zoom `1:1` native HD / Fit viewport / Zoom to active frame |
+| `o` / `Shift+O` | Rotate `CROP` viewport `+90°` / `-90°` |
+| `\` (hold) | Before / After comparison in `DEVELOP` mode |
+| `i` / `m` / `r` | Positive preview / IR dust mask overlay (synced across `CROP` & `DEVELOP`) / raw 16-bit IR |
+| `d` / `Shift+D` (`Del`) | Delete active frame / Delete whole selection (`CROP`) |
+| `Shift+A` / `g` | Auto-detect strips & frames / Stamp strip grid |
+| Right-drag / Middle-drag | Pan / translate viewport in both `CROP` & `DEVELOP` (even while Heal Brush is active) |
+| `Ctrl+S` / `e` / `Shift+E` | Save layout JSON / Export selection (or active Develop frame) / Export all frames |
 
 ---
 

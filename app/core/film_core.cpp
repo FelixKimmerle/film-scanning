@@ -9,14 +9,38 @@
 
 #include <tiffio.h>
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
+
+template <typename Fn>
+static void parallel_for_rows(int total_rows, int num_threads, Fn&& fn) {
+    if (total_rows <= 0) return;
+    int nt = std::min(num_threads, total_rows);
+    if (nt <= 1 || total_rows < 64) {
+        fn(0, total_rows);
+        return;
+    }
+    std::vector<std::thread> pool;
+    pool.reserve(static_cast<size_t>(nt - 1));
+    for (int t = 0; t < nt; ++t) {
+        int y0 = (total_rows * t) / nt;
+        int y1 = (total_rows * (t + 1)) / nt;
+        if (t == nt - 1) {
+            fn(y0, y1);
+        } else {
+            pool.emplace_back([&, y0, y1]() { fn(y0, y1); });
+        }
+    }
+    for (auto& th : pool) th.join();
+}
 
 struct TiffInfo {
     uint32_t width;
@@ -45,17 +69,62 @@ struct DevelopParams {
     float base_r;      // true unexposed film base R (0..1 linear; <=0 means auto)
     float base_g;
     float base_b;
-    float exposure;    // -2.0 .. +2.0 EV (default 0.0)
-    float contrast;    // 0.60 .. 1.60 RA-4 paper grade (default 1.0)
-    float blacks;      // -0.5 .. +0.5 toe lift/crush (default 0.0)
+    float exposure;      // -2.0 .. +2.0 EV (default 0.0)
+    float contrast;      // 0.60 .. 1.60 RA-4 paper grade (default 1.0)
+    float highlights;    // -1.0 .. +1.0 upper-tone / C-41 shoulder recovery (default 0.0)
+    float blacks;        // -0.5 .. +0.5 shadow-toe lift/crush (default 0.0)
     float temp;        // -1.0 .. +1.0 (Blue <-> Amber)
     float tint;        // -1.0 .. +1.0 (Green <-> Magenta)
     float saturation;  // 0.0 .. 2.0 (default 1.0)
     float chroma_nr;   // 0.0 .. 1.0 YCbCr edge-preserving chroma bilateral NR
     float luma_nr;     // 0.0 .. 1.0 shadow-weighted edge-preserving luma NR
-    float sharpen;     // 0.0 .. 1.0 flatbed optical USM
-    int auto_wb;       // 0 = off, 1 = Shades-of-Gray illuminant balance in density space
+    float sharpen;       // 0.0 .. 1.0 flatbed optical USM
+    int auto_wb;         // 0 = off, 1 = Shades-of-Gray illuminant balance in density space
+    float ir_sensitivity;// <0 = use global fallback, else 0.05..0.98
+    int ir_dilate;       // <0 = auto (dpi/1100, clamped 1..3), else 0..6 px halo/smoothing radius
+    int ir_auto_shift;   // 1 = auto-detect +/-6 px RGB<->IR shift, 0 = manual shift_x/shift_y
+    int ir_shift_x;      // manual shift X in native scan pixels (-8..+8)
+    int ir_shift_y;      // manual shift Y in native scan pixels (-8..+8)
+    int ir_show_mask;    // preview-only: 1 = overlay magenta IR dust mask on developed output
 };
+
+struct IrSpot {
+    float u;             // normalized X [0..1] inside exported frame
+    float v;             // normalized Y [0..1] inside exported frame
+    float r;             // normalized radius relative to max(w, h)
+    int erase;           // 0 = paint/heal (255), 1 = erase/protect (0)
+};
+
+static void apply_manual_ir_spots(
+    std::vector<uint8_t>& dmask,
+    int w,
+    int h,
+    const IrSpot* spots,
+    int num_spots
+) {
+    if (!spots || num_spots <= 0 || w <= 0 || h <= 0) return;
+    if (dmask.empty()) dmask.assign(static_cast<size_t>(w) * h, 0);
+    const float scale = static_cast<float>(std::max(w, h));
+    for (int si = 0; si < num_spots; ++si) {
+        const float cx = spots[si].u * static_cast<float>(w);
+        const float cy = spots[si].v * static_cast<float>(h);
+        const float rad = std::max(1.0f, spots[si].r * scale);
+        const float r2 = rad * rad;
+        const uint8_t val = spots[si].erase ? 0 : 255;
+        int x0 = std::max(0, static_cast<int>(std::floor(cx - rad)));
+        int x1 = std::min(w - 1, static_cast<int>(std::ceil(cx + rad)));
+        int y0 = std::max(0, static_cast<int>(std::floor(cy - rad)));
+        int y1 = std::min(h - 1, static_cast<int>(std::ceil(cy + rad)));
+        for (int y = y0; y <= y1; ++y) {
+            float dy = (static_cast<float>(y) + 0.5f) - cy;
+            uint8_t* row = &dmask[static_cast<size_t>(y) * w];
+            for (int x = x0; x <= x1; ++x) {
+                float dx = (static_cast<float>(x) + 0.5f) - cx;
+                if (dx * dx + dy * dy <= r2) row[x] = val;
+            }
+        }
+    }
+}
 
 struct LoadedScan {
     uint32_t w = 0;
@@ -255,10 +324,19 @@ static void compute_ir_dust_mask(
     float sensitivity, // 0.0 .. 1.0 (default ~0.5)
     int dilate_px,
     std::vector<uint8_t>& mask_out,
-    const uint16_t* rgb = nullptr // optional: enables auto RGB<->IR shift alignment + dye-bleed guard
+    const uint16_t* rgb = nullptr, // optional: enables auto RGB<->IR shift alignment + dye-bleed guard
+    bool auto_shift = true,
+    int manual_dx = 0,
+    int manual_dy = 0,
+    int* out_dx = nullptr,
+    int* out_dy = nullptr,
+    int* out_dust_px = nullptr
 ) {
     const size_t npix = static_cast<size_t>(w) * h;
     mask_out.assign(npix, 0);
+    if (out_dx) *out_dx = 0;
+    if (out_dy) *out_dy = 0;
+    if (out_dust_px) *out_dust_px = 0;
     if (!ir || w < 8 || h < 8 || sensitivity <= 0.001f) return;
 
     const int iw = w + 1;
@@ -376,8 +454,9 @@ static void compute_ir_dust_mask(
             }
         }
 
-        int best_dx = 0, best_dy = 0;
-        if (pts.size() >= 25) {
+        int best_dx = auto_shift ? 0 : manual_dx;
+        int best_dy = auto_shift ? 0 : manual_dy;
+        if (auto_shift && pts.size() >= 25) {
             const size_t stride = std::max<size_t>(1, pts.size() / 4000);
             const int r_loc = std::max(8, radius / 2);
             auto eval_shift = [&](int dx, int dy) -> double {
@@ -411,6 +490,8 @@ static void compute_ir_dust_mask(
                 best_dy = 0;
             }
         }
+        if (out_dx) *out_dx = best_dx;
+        if (out_dy) *out_dy = best_dy;
 
         // Apply shift + cross-check borderline IR hits against RGB local dip
         // (prevents dense-highlight dye crosstalk from blurring clean textured areas)
@@ -445,6 +526,11 @@ static void compute_ir_dust_mask(
     // Morphological dilation (box radius = dilate_px) to cover dust halos
     if (dilate_px <= 0) {
         mask_out.swap(raw_mask);
+        if (out_dust_px) {
+            int cnt = 0;
+            for (uint8_t v : mask_out) if (v) ++cnt;
+            *out_dust_px = cnt;
+        }
         return;
     }
     std::vector<uint8_t> tmp(npix, 0);
@@ -459,6 +545,7 @@ static void compute_ir_dust_mask(
             }
         }
     }
+    int dust_cnt = 0;
     for (int y = 0; y < h; ++y) {
         int y0 = std::max(0, y - dilate_px);
         int y1 = std::min(h - 1, y + dilate_px);
@@ -469,7 +556,11 @@ static void compute_ir_dust_mask(
                 if (src[x]) dst[x] = 255;
             }
         }
+        if (out_dust_px) {
+            for (int x = 0; x < w; ++x) if (dst[x]) ++dust_cnt;
+        }
     }
+    if (out_dust_px) *out_dust_px = dust_cnt;
 }
 
 // Fast deterministic integer hash -> approximate unit-variance Gaussian noise [-2.2 .. +2.2]
@@ -513,7 +604,7 @@ static void inpaint_rgb16(
 
     std::vector<int> frontier;
     frontier.reserve(masked_indices.size());
-    for (int pass = 0; pass < 40; ++pass) {
+    for (int pass = 0; pass < 120; ++pass) {
         frontier.clear();
         for (int idx : masked_indices) {
             if (filled[idx]) continue;
@@ -1191,48 +1282,71 @@ int fc_export_frames(
     // Tighter dilation now that RGB<->IR shift is auto-aligned (3px at 3200 DPI instead of 5px)
     const int ir_dilate = std::clamp(static_cast<int>(std::lround(scan.dpi_x / 1100.0f)), 1, 3);
 
-    for (int i = 0; i < num_frames; ++i) {
-        int ow = 0, oh = 0;
-        std::vector<uint16_t> crop_rgb, crop_ir;
-        bilinear_crop_rotated(
-            scan.rgb.data(),
-            (apply_ir_clean && scan.has_ir) ? scan.ir.data() : nullptr,
-            static_cast<int>(scan.w),
-            static_cast<int>(scan.h),
-            frames[i],
-            ow,
-            oh,
-            crop_rgb,
-            crop_ir
-        );
+    const int hw = std::max(1, static_cast<int>(std::thread::hardware_concurrency()));
+    const int workers = std::min({num_frames, hw, 16});
+    std::atomic<int> next_idx{0};
+    std::atomic<int> first_err{0};
 
-        if (apply_ir_clean && scan.has_ir && !crop_ir.empty()) {
-            std::vector<uint8_t> dust_mask;
-            compute_ir_dust_mask(crop_ir.data(), ow, oh, ir_radius, ir_sensitivity, ir_dilate, dust_mask, crop_rgb.data());
-            inpaint_rgb16(crop_rgb.data(), dust_mask.data(), ow, oh, 64);
-        }
+    auto worker_fn = [&]() {
+        while (true) {
+            if (first_err.load(std::memory_order_relaxed) != 0) return;
+            int i = next_idx.fetch_add(1, std::memory_order_relaxed);
+            if (i >= num_frames) return;
 
-        // Optionally export quick positive proof (PPM -> Python converts to JPEG cleanly)
-        if (positive_mode > 0 && out_pos_ppm_paths && out_pos_ppm_paths[i] && out_pos_ppm_paths[i][0]) {
-            std::vector<uint8_t> pos8(static_cast<size_t>(ow) * oh * 3);
-            render_rgb8_preview(crop_rgb.data(), ow, oh, positive_mode, scan.is_linear_hdr, pos8.data());
-            FILE* fp = std::fopen(out_pos_ppm_paths[i], "wb");
-            if (fp) {
-                std::fprintf(fp, "P6\n%d %d\n255\n", ow, oh);
-                std::fwrite(pos8.data(), 1, pos8.size(), fp);
-                std::fclose(fp);
+            int ow = 0, oh = 0;
+            std::vector<uint16_t> crop_rgb, crop_ir;
+            bilinear_crop_rotated(
+                scan.rgb.data(),
+                (apply_ir_clean && scan.has_ir) ? scan.ir.data() : nullptr,
+                static_cast<int>(scan.w),
+                static_cast<int>(scan.h),
+                frames[i],
+                ow,
+                oh,
+                crop_rgb,
+                crop_ir
+            );
+
+            if (apply_ir_clean && scan.has_ir && !crop_ir.empty()) {
+                std::vector<uint8_t> dust_mask;
+                compute_ir_dust_mask(crop_ir.data(), ow, oh, ir_radius, ir_sensitivity, ir_dilate, dust_mask, crop_rgb.data());
+                inpaint_rgb16(crop_rgb.data(), dust_mask.data(), ow, oh, 64);
+            }
+
+            // Optionally export quick positive proof (PPM -> Python converts to JPEG cleanly)
+            if (positive_mode > 0 && out_pos_ppm_paths && out_pos_ppm_paths[i] && out_pos_ppm_paths[i][0]) {
+                std::vector<uint8_t> pos8(static_cast<size_t>(ow) * oh * 3);
+                render_rgb8_preview(crop_rgb.data(), ow, oh, positive_mode, scan.is_linear_hdr, pos8.data());
+                FILE* fp = std::fopen(out_pos_ppm_paths[i], "wb");
+                if (fp) {
+                    std::fprintf(fp, "P6\n%d %d\n255\n", ow, oh);
+                    std::fwrite(pos8.data(), 1, pos8.size(), fp);
+                    std::fclose(fp);
+                }
+            }
+
+            if (gamma_mode == 1 && scan.is_linear_hdr) {
+                for (uint16_t& px : crop_rgb) px = gamma_lut[px];
+            }
+
+            if (!write_tiff_rgb16(out_tiff_paths[i], crop_rgb.data(), static_cast<uint32_t>(ow), static_cast<uint32_t>(oh), scan.dpi_x, scan.dpi_y)) {
+                int expected = 0;
+                first_err.compare_exchange_strong(expected, -(100 + i));
+                return;
             }
         }
+    };
 
-        if (gamma_mode == 1 && scan.is_linear_hdr) {
-            for (uint16_t& px : crop_rgb) px = gamma_lut[px];
-        }
-
-        if (!write_tiff_rgb16(out_tiff_paths[i], crop_rgb.data(), static_cast<uint32_t>(ow), static_cast<uint32_t>(oh), scan.dpi_x, scan.dpi_y)) {
-            return -(100 + i);
-        }
+    if (workers <= 1) {
+        worker_fn();
+    } else {
+        std::vector<std::thread> pool;
+        pool.reserve(static_cast<size_t>(workers - 1));
+        for (int t = 0; t < workers - 1; ++t) pool.emplace_back(worker_fn);
+        worker_fn();
+        for (auto& th : pool) th.join();
     }
-    return 0;
+    return first_err.load();
 }
 
 // Streams N horizontal tiles side-by-side into one 64-bit BigTIFF (RGB16 + optional IR16).
@@ -1434,20 +1548,27 @@ static void apply_ycbcr_denoise_and_usm(
     float chroma_nr,
     float luma_nr,
     float sharpen,
-    float res_scale // ~1.0 at preview (1000px), ~2.5 at full 3200 DPI frame
+    float res_scale, // ~1.0 at preview (1000px), ~2.0 at full 3200 DPI frame
+    int num_threads = 1
 ) {
     const size_t npix = static_cast<size_t>(w) * h;
     if (npix < 16) return;
     if (chroma_nr <= 0.001f && luma_nr <= 0.001f && sharpen <= 0.001f) return;
 
     std::vector<float> Y(npix), Cb(npix), Cr(npix);
-    for (size_t i = 0; i < npix; ++i) {
-        float r = rgb[i * 3 + 0], g = rgb[i * 3 + 1], b = rgb[i * 3 + 2];
-        float y = 0.2126f * r + 0.7152f * g + 0.0722f * b;
-        Y[i]  = y;
-        Cb[i] = (b - y) * 0.5389f;
-        Cr[i] = (r - y) * 0.6350f;
-    }
+    parallel_for_rows(h, num_threads, [&](int y0, int y1) {
+        for (int y = y0; y < y1; ++y) {
+            size_t row = static_cast<size_t>(y) * w;
+            for (int x = 0; x < w; ++x) {
+                size_t i = row + x;
+                float r = rgb[i * 3 + 0], g = rgb[i * 3 + 1], b = rgb[i * 3 + 2];
+                float lv = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+                Y[i]  = lv;
+                Cb[i] = (b - lv) * 0.5389f;
+                Cr[i] = (r - lv) * 0.6350f;
+            }
+        }
+    });
 
     // 1. Edge-preserving separable bilateral filter on Cb & Cr (stops strictly on Y edges!)
     if (chroma_nr > 0.005f) {
@@ -1455,48 +1576,50 @@ static void apply_ycbcr_denoise_and_usm(
         float inv_2sig_s = 1.0f / (2.0f * (rad * 0.65f) * (rad * 0.65f));
         float sig_y = 0.075f + 0.08f * chroma_nr;
         float inv_2sig_y = 1.0f / (2.0f * sig_y * sig_y);
+        float mix = std::clamp(chroma_nr * 1.15f, 0.0f, 1.0f);
 
         std::vector<float> tmp_cb(npix), tmp_cr(npix);
-        // Horizontal pass
-        for (int y = 0; y < h; ++y) {
-            size_t row = static_cast<size_t>(y) * w;
-            for (int x = 0; x < w; ++x) {
-                float yc = Y[row + x];
-                float scb = 0.0f, scr = 0.0f, sw = 0.0f;
-                int x0 = std::max(0, x - rad), x1 = std::min(w - 1, x + rad);
-                for (int xx = x0; xx <= x1; ++xx) {
-                    float dx = static_cast<float>(xx - x);
-                    float dy = Y[row + xx] - yc;
-                    float wt = std::exp(-(dx * dx) * inv_2sig_s - (dy * dy) * inv_2sig_y);
-                    scb += Cb[row + xx] * wt;
-                    scr += Cr[row + xx] * wt;
-                    sw += wt;
+        parallel_for_rows(h, num_threads, [&](int ry0, int ry1) {
+            for (int y = ry0; y < ry1; ++y) {
+                size_t row = static_cast<size_t>(y) * w;
+                for (int x = 0; x < w; ++x) {
+                    float yc = Y[row + x];
+                    float scb = 0.0f, scr = 0.0f, sw = 0.0f;
+                    int x0 = std::max(0, x - rad), x1 = std::min(w - 1, x + rad);
+                    for (int xx = x0; xx <= x1; ++xx) {
+                        float dx = static_cast<float>(xx - x);
+                        float dy = Y[row + xx] - yc;
+                        float wt = std::exp(-(dx * dx) * inv_2sig_s - (dy * dy) * inv_2sig_y);
+                        scb += Cb[row + xx] * wt;
+                        scr += Cr[row + xx] * wt;
+                        sw += wt;
+                    }
+                    tmp_cb[row + x] = scb / sw;
+                    tmp_cr[row + x] = scr / sw;
                 }
-                tmp_cb[row + x] = scb / sw;
-                tmp_cr[row + x] = scr / sw;
             }
-        }
-        // Vertical pass
-        for (int y = 0; y < h; ++y) {
-            int y0 = std::max(0, y - rad), y1 = std::min(h - 1, y + rad);
-            for (int x = 0; x < w; ++x) {
-                size_t idx = static_cast<size_t>(y) * w + x;
-                float yc = Y[idx];
-                float scb = 0.0f, scr = 0.0f, sw = 0.0f;
-                for (int yy = y0; yy <= y1; ++yy) {
-                    size_t ni = static_cast<size_t>(yy) * w + x;
-                    float dd = static_cast<float>(yy - y);
-                    float dy = Y[ni] - yc;
-                    float wt = std::exp(-(dd * dd) * inv_2sig_s - (dy * dy) * inv_2sig_y);
-                    scb += tmp_cb[ni] * wt;
-                    scr += tmp_cr[ni] * wt;
-                    sw += wt;
+        });
+        parallel_for_rows(h, num_threads, [&](int ry0, int ry1) {
+            for (int y = ry0; y < ry1; ++y) {
+                int y0 = std::max(0, y - rad), y1 = std::min(h - 1, y + rad);
+                for (int x = 0; x < w; ++x) {
+                    size_t idx = static_cast<size_t>(y) * w + x;
+                    float yc = Y[idx];
+                    float scb = 0.0f, scr = 0.0f, sw = 0.0f;
+                    for (int yy = y0; yy <= y1; ++yy) {
+                        size_t ni = static_cast<size_t>(yy) * w + x;
+                        float dd = static_cast<float>(yy - y);
+                        float dy = Y[ni] - yc;
+                        float wt = std::exp(-(dd * dd) * inv_2sig_s - (dy * dy) * inv_2sig_y);
+                        scb += tmp_cb[ni] * wt;
+                        scr += tmp_cr[ni] * wt;
+                        sw += wt;
+                    }
+                    Cb[idx] = Cb[idx] * (1.0f - mix) + (scb / sw) * mix;
+                    Cr[idx] = Cr[idx] * (1.0f - mix) + (scr / sw) * mix;
                 }
-                float mix = std::clamp(chroma_nr * 1.15f, 0.0f, 1.0f);
-                Cb[idx] = Cb[idx] * (1.0f - mix) + (scb / sw) * mix;
-                Cr[idx] = Cr[idx] * (1.0f - mix) + (scr / sw) * mix;
             }
-        }
+        });
     }
 
     // 2. Optional shadow-weighted edge-preserving bilateral luma NR (tames harsh shadow CCD noise)
@@ -1507,43 +1630,46 @@ static void apply_ycbcr_denoise_and_usm(
         float inv_2sig_y = 1.0f / (2.0f * sig_y * sig_y);
 
         std::vector<float> tmp_y(npix), out_y(npix);
-        for (int y = 0; y < h; ++y) {
-            size_t row = static_cast<size_t>(y) * w;
-            for (int x = 0; x < w; ++x) {
-                float yc = Y[row + x];
-                float sy = 0.0f, sw = 0.0f;
-                int x0 = std::max(0, x - rad), x1 = std::min(w - 1, x + rad);
-                for (int xx = x0; xx <= x1; ++xx) {
-                    float dx = static_cast<float>(xx - x);
-                    float dy = Y[row + xx] - yc;
-                    float wt = std::exp(-(dx * dx) * inv_2sig_s - (dy * dy) * inv_2sig_y);
-                    sy += Y[row + xx] * wt;
-                    sw += wt;
+        parallel_for_rows(h, num_threads, [&](int ry0, int ry1) {
+            for (int y = ry0; y < ry1; ++y) {
+                size_t row = static_cast<size_t>(y) * w;
+                for (int x = 0; x < w; ++x) {
+                    float yc = Y[row + x];
+                    float sy = 0.0f, sw = 0.0f;
+                    int x0 = std::max(0, x - rad), x1 = std::min(w - 1, x + rad);
+                    for (int xx = x0; xx <= x1; ++xx) {
+                        float dx = static_cast<float>(xx - x);
+                        float dy = Y[row + xx] - yc;
+                        float wt = std::exp(-(dx * dx) * inv_2sig_s - (dy * dy) * inv_2sig_y);
+                        sy += Y[row + xx] * wt;
+                        sw += wt;
+                    }
+                    tmp_y[row + x] = sy / sw;
                 }
-                tmp_y[row + x] = sy / sw;
             }
-        }
-        for (int y = 0; y < h; ++y) {
-            int y0 = std::max(0, y - rad), y1 = std::min(h - 1, y + rad);
-            for (int x = 0; x < w; ++x) {
-                size_t idx = static_cast<size_t>(y) * w + x;
-                float yc = Y[idx];
-                float sy = 0.0f, sw = 0.0f;
-                for (int yy = y0; yy <= y1; ++yy) {
-                    size_t ni = static_cast<size_t>(yy) * w + x;
-                    float dd = static_cast<float>(yy - y);
-                    float dy = tmp_y[ni] - yc;
-                    float wt = std::exp(-(dd * dd) * inv_2sig_s - (dy * dy) * inv_2sig_y);
-                    sy += tmp_y[ni] * wt;
-                    sw += wt;
+        });
+        parallel_for_rows(h, num_threads, [&](int ry0, int ry1) {
+            for (int y = ry0; y < ry1; ++y) {
+                int y0 = std::max(0, y - rad), y1 = std::min(h - 1, y + rad);
+                for (int x = 0; x < w; ++x) {
+                    size_t idx = static_cast<size_t>(y) * w + x;
+                    float yc = Y[idx];
+                    float sy = 0.0f, sw = 0.0f;
+                    for (int yy = y0; yy <= y1; ++yy) {
+                        size_t ni = static_cast<size_t>(yy) * w + x;
+                        float dd = static_cast<float>(yy - y);
+                        float dy = tmp_y[ni] - yc;
+                        float wt = std::exp(-(dd * dd) * inv_2sig_s - (dy * dy) * inv_2sig_y);
+                        sy += tmp_y[ni] * wt;
+                        sw += wt;
+                    }
+                    float filt = sy / sw;
+                    float shadow_w = 0.30f + 0.70f * std::pow(std::clamp(1.0f - yc, 0.0f, 1.0f), 1.4f);
+                    float mix = std::clamp(luma_nr * shadow_w, 0.0f, 0.92f);
+                    out_y[idx] = yc * (1.0f - mix) + filt * mix;
                 }
-                float filt = sy / sw;
-                // Weight stronger in dark shadows where flatbed CCD noise dominates
-                float shadow_w = 0.30f + 0.70f * std::pow(std::clamp(1.0f - yc, 0.0f, 1.0f), 1.4f);
-                float mix = std::clamp(luma_nr * shadow_w, 0.0f, 0.92f);
-                out_y[idx] = yc * (1.0f - mix) + filt * mix;
             }
-        }
+        });
         Y.swap(out_y);
     }
 
@@ -1551,44 +1677,61 @@ static void apply_ycbcr_denoise_and_usm(
     if (sharpen > 0.005f) {
         int r = std::clamp(static_cast<int>(std::lround(1.2f * std::min(2.0f, std::max(0.8f, res_scale)))), 1, 3);
         std::vector<float> blur_h(npix), blur_v(npix);
-        for (int y = 0; y < h; ++y) {
-            size_t row = static_cast<size_t>(y) * w;
-            for (int x = 0; x < w; ++x) {
-                float s = 0.0f; int cnt = 0;
-                for (int xx = std::max(0, x - r); xx <= std::min(w - 1, x + r); ++xx) { s += Y[row + xx]; cnt++; }
-                blur_h[row + x] = s / cnt;
+        parallel_for_rows(h, num_threads, [&](int ry0, int ry1) {
+            for (int y = ry0; y < ry1; ++y) {
+                size_t row = static_cast<size_t>(y) * w;
+                for (int x = 0; x < w; ++x) {
+                    float s = 0.0f; int cnt = 0;
+                    for (int xx = std::max(0, x - r); xx <= std::min(w - 1, x + r); ++xx) { s += Y[row + xx]; cnt++; }
+                    blur_h[row + x] = s / cnt;
+                }
             }
-        }
-        for (int y = 0; y < h; ++y) {
-            int y0 = std::max(0, y - r), y1 = std::min(h - 1, y + r);
-            for (int x = 0; x < w; ++x) {
-                float s = 0.0f; int cnt = 0;
-                for (int yy = y0; yy <= y1; ++yy) { s += blur_h[static_cast<size_t>(yy) * w + x]; cnt++; }
-                blur_v[static_cast<size_t>(y) * w + x] = s / cnt;
-            }
-        }
+        });
         float amt = sharpen * 1.15f;
         float thresh = 0.010f;
-        for (size_t i = 0; i < npix; ++i) {
-            float detail = Y[i] - blur_v[i];
-            float ad = std::fabs(detail);
-            if (ad > thresh) {
-                float soft = (ad - thresh) / ad;
-                Y[i] = std::clamp(Y[i] + amt * detail * soft, 0.0f, 1.0f);
+        parallel_for_rows(h, num_threads, [&](int ry0, int ry1) {
+            for (int y = ry0; y < ry1; ++y) {
+                int y0 = std::max(0, y - r), y1 = std::min(h - 1, y + r);
+                size_t row = static_cast<size_t>(y) * w;
+                for (int x = 0; x < w; ++x) {
+                    float s = 0.0f; int cnt = 0;
+                    for (int yy = y0; yy <= y1; ++yy) { s += blur_h[static_cast<size_t>(yy) * w + x]; cnt++; }
+                    blur_v[row + x] = s / cnt;
+                }
             }
-        }
+        });
+        parallel_for_rows(h, num_threads, [&](int ry0, int ry1) {
+            for (int y = ry0; y < ry1; ++y) {
+                size_t row = static_cast<size_t>(y) * w;
+                for (int x = 0; x < w; ++x) {
+                    size_t i = row + x;
+                    float detail = Y[i] - blur_v[i];
+                    float ad = std::fabs(detail);
+                    if (ad > thresh) {
+                        float soft = (ad - thresh) / ad;
+                        Y[i] = std::clamp(Y[i] + amt * detail * soft, 0.0f, 1.0f);
+                    }
+                }
+            }
+        });
     }
 
     // Convert YCbCr back to RGB
-    for (size_t i = 0; i < npix; ++i) {
-        float y = Y[i], cb = Cb[i], cr = Cr[i];
-        float r = y + 1.5748f * cr;
-        float g = y - 0.1873f * cb - 0.4681f * cr;
-        float b = y + 1.8556f * cb;
-        rgb[i * 3 + 0] = std::clamp(r, 0.0f, 1.0f);
-        rgb[i * 3 + 1] = std::clamp(g, 0.0f, 1.0f);
-        rgb[i * 3 + 2] = std::clamp(b, 0.0f, 1.0f);
-    }
+    parallel_for_rows(h, num_threads, [&](int ry0, int ry1) {
+        for (int y = ry0; y < ry1; ++y) {
+            size_t row = static_cast<size_t>(y) * w;
+            for (int x = 0; x < w; ++x) {
+                size_t i = row + x;
+                float lv = Y[i], cb = Cb[i], cr = Cr[i];
+                float r = lv + 1.5748f * cr;
+                float g = lv - 0.1873f * cb - 0.4681f * cr;
+                float b = lv + 1.8556f * cb;
+                rgb[i * 3 + 0] = std::clamp(r, 0.0f, 1.0f);
+                rgb[i * 3 + 1] = std::clamp(g, 0.0f, 1.0f);
+                rgb[i * 3 + 2] = std::clamp(b, 0.0f, 1.0f);
+            }
+        }
+    });
 }
 
 // Physical Film Lab Engine: converts raw 16-bit scan frame into developed [0..1] display RGB float buffer.
@@ -1600,7 +1743,8 @@ static void develop_rgb16_to_float(
     bool is_linear,
     const DevelopParams& p,
     float res_scale,
-    std::vector<float>& out_rgb
+    std::vector<float>& out_rgb,
+    int num_threads = 1
 ) {
     const size_t npix = static_cast<size_t>(w) * h;
     out_rgb.assign(npix * 3, 0.0f);
@@ -1736,19 +1880,20 @@ static void develop_rgb16_to_float(
         }
     }
 
-    // 4. Apply enlarger exposure, dichroic Temp/Tint, blacks, RA-4 S-curve, and saturation
+    // 4. Apply enlarger exposure, dichroic Temp/Tint, shadow-toe blacks, highlight shoulder, RA-4 S-curve, and saturation
     const float exp_shift = p.exposure * 0.24f;
     const float grade = std::clamp(p.contrast * prof.grade_mul, 0.50f, 1.90f);
-    const float black_shift = p.blacks * 0.35f + prof.black_floor;
+    const float blacks_amt = std::clamp(p.blacks, -0.50f, 0.50f) * 0.42f;
+    const float hi_amt = std::clamp(p.highlights, -1.0f, 1.0f) * 0.62f;
     const float temp_r =  p.temp * 0.14f + prof.warm_r;
     const float temp_b = -p.temp * 0.14f + prof.warm_b;
     const float tint_g = -p.tint * 0.12f;
     const float sat = is_bw ? 0.0f : std::clamp(p.saturation * prof.sat_mul, 0.0f, 2.2f);
 
-    // Smooth photographic RA-4 print curve: sigmoid toe + gentle highlight shoulder
+    // Smooth photographic RA-4 print curve: sigmoid toe + gentle highlight shoulder (accepts extended C-41 latitude up to 1.8)
     auto ra4_curve = [grade](float x) -> float {
-        float xc = std::clamp(x, 0.0f, 1.35f);
-        // Soft highlight roll-off above 0.80 so bright skies/lamps keep detail like print paper
+        float xc = std::clamp(x, 0.0f, 1.80f);
+        // Soft highlight roll-off above 0.78 so bright skies/lamps keep detail like print paper
         if (xc > 0.78f) {
             float over = xc - 0.78f;
             xc = 0.78f + (over * 0.22f) / (over + 0.22f);
@@ -1763,9 +1908,28 @@ static void develop_rgb16_to_float(
     };
 
     for (size_t i = 0; i < npix; ++i) {
-        float r = (dens[i * 3 + 0] - black_pt[0]) / span[0] + exp_shift + black_shift + temp_r;
-        float g = (dens[i * 3 + 1] - black_pt[1]) / span[1] + exp_shift + black_shift + tint_g;
-        float b = (dens[i * 3 + 2] - black_pt[2]) / span[2] + exp_shift + black_shift + temp_b;
+        float r = (dens[i * 3 + 0] - black_pt[0]) / span[0] + exp_shift + prof.black_floor + temp_r;
+        float g = (dens[i * 3 + 1] - black_pt[1]) / span[1] + exp_shift + prof.black_floor + tint_g;
+        float b = (dens[i * 3 + 2] - black_pt[2]) / span[2] + exp_shift + prof.black_floor + temp_b;
+
+        // Luminance-anchored tonal zones -> zero hue shift when rescuing highlights or lifting shadows
+        if (std::fabs(blacks_amt) > 1e-4f || std::fabs(hi_amt) > 1e-4f) {
+            float lum = 0.299f * r + 0.587f * g + 0.114f * b;
+            float delta = 0.0f;
+            if (std::fabs(blacks_amt) > 1e-4f && lum < 0.58f) {
+                float st = std::clamp((0.58f - lum) / 0.58f, 0.0f, 1.0f);
+                float sw = st * st * (3.0f - 2.0f * st);
+                delta += blacks_amt * sw;
+            }
+            if (std::fabs(hi_amt) > 1e-4f && lum > 0.42f) {
+                float ht = std::clamp((lum - 0.42f) / 0.68f, 0.0f, 1.60f);
+                float hw = (ht * ht) / (0.65f + ht);
+                delta += hi_amt * hw;
+            }
+            r += delta;
+            g += delta;
+            b += delta;
+        }
 
         r = ra4_curve(r);
         g = ra4_curve(g);
@@ -1790,7 +1954,7 @@ static void develop_rgb16_to_float(
     }
 
     // 5. YCbCr Chroma/Luma Bilateral NR + Flatbed USM
-    apply_ycbcr_denoise_and_usm(out_rgb, w, h, p.chroma_nr, p.luma_nr, p.sharpen, res_scale);
+    apply_ycbcr_denoise_and_usm(out_rgb, w, h, p.chroma_nr, p.luma_nr, p.sharpen, res_scale, num_threads);
 }
 
 extern "C" {
@@ -1890,9 +2054,13 @@ int fc_develop_frame_preview(
     int film_type, // 1=color_neg, 2=bw_neg, 3=slide
     int* out_w,
     int* out_h,
-    uint8_t* out_rgb8 // caller allocates max_dim * max_dim * 3
+    uint8_t* out_rgb8, // caller allocates max_dim * max_dim * 3
+    int* out_ir_stats, // nullable int[4]: [shift_x_nat, shift_y_nat, dust_px, auto_dilate_nat]
+    const IrSpot* spots,
+    int num_spots
 ) {
     if (!src_path || !frame || !dev || !out_w || !out_h || !out_rgb8) return -1;
+    if (out_ir_stats) { out_ir_stats[0] = 0; out_ir_stats[1] = 0; out_ir_stats[2] = 0; out_ir_stats[3] = 0; }
     TIFFSetWarningHandler(nullptr);
     TIFFSetErrorHandler(nullptr);
     TIFF* tif = TIFFOpen(src_path, "r");
@@ -1962,8 +2130,24 @@ int fc_develop_frame_preview(
         }
     }
 
-    if (apply_ir_clean) {
-        while (TIFFReadDirectory(tif)) {
+    const bool need_ir = (apply_ir_clean != 0) || (dev->ir_show_mask != 0);
+    if (need_ir) {
+        if (spp >= 4) {
+            // 4-channel RGBI (VueScan): extract channel 3 from directory 0
+            has_ir = true;
+            reg_ir.assign(static_cast<size_t>(rw) * rh, 0);
+            for (int y = 0; y < rh; ++y) {
+                if (TIFFReadScanline(tif, sbuf.data(), static_cast<uint32_t>(ry + y), 0) < 0) continue;
+                uint16_t* dst = &reg_ir[static_cast<size_t>(y) * rw];
+                if (bps == 16) {
+                    const uint16_t* src = reinterpret_cast<const uint16_t*>(sbuf.data());
+                    for (int x = 0; x < rw; ++x) dst[x] = src[(rx + x) * spp + 3];
+                } else {
+                    for (int x = 0; x < rw; ++x) dst[x] = static_cast<uint16_t>(sbuf[(rx + x) * spp + 3]) * 257u;
+                }
+            }
+        }
+        while (!has_ir && TIFFReadDirectory(tif)) {
             uint32_t w2 = 0, h2 = 0;
             uint16_t spp2 = 0, bps2 = 0;
             TIFFGetField(tif, TIFFTAG_IMAGEWIDTH, &w2);
@@ -2009,57 +2193,105 @@ int fc_develop_frame_preview(
     const double step_src = 1.0 / down;
     const double hx = (pw - 1) * 0.5;
     const double hy = (ph - 1) * 0.5;
+    const int hw = std::max(1, static_cast<int>(std::thread::hardware_concurrency()));
+    const int prev_threads = std::min(12, hw);
 
-    for (int y = 0; y < ph; ++y) {
-        double dy = (y - hy) * step_src;
-        for (int x = 0; x < pw; ++x) {
-            double dx = (x - hx) * step_src;
-            double sx = lcx + dx * c_ang - dy * s_ang;
-            double sy = lcy + dx * s_ang + dy * c_ang;
-            int ix = std::clamp(static_cast<int>(std::floor(sx)), 0, rw - 1);
-            int iy = std::clamp(static_cast<int>(std::floor(sy)), 0, rh - 1);
-            int ix1 = std::min(rw - 1, ix + 1);
-            int iy1 = std::min(rh - 1, iy + 1);
-            double fx = sx - ix, fy = sy - iy;
-            double w00 = (1.0 - fx) * (1.0 - fy), w10 = fx * (1.0 - fy), w01 = (1.0 - fx) * fy, w11 = fx * fy;
-            size_t i00 = static_cast<size_t>(iy) * rw + ix;
-            size_t i10 = static_cast<size_t>(iy) * rw + ix1;
-            size_t i01 = static_cast<size_t>(iy1) * rw + ix;
-            size_t i11 = static_cast<size_t>(iy1) * rw + ix1;
-            size_t dst = static_cast<size_t>(y) * pw + x;
-            for (int c = 0; c < 3; ++c) {
-                double val = w00 * reg_rgb[i00 * 3 + c] + w10 * reg_rgb[i10 * 3 + c]
-                           + w01 * reg_rgb[i01 * 3 + c] + w11 * reg_rgb[i11 * 3 + c];
-                crop_rgb[dst * 3 + c] = static_cast<uint16_t>(std::clamp(std::lround(val), 0l, 65535l));
+    parallel_for_rows(ph, prev_threads, [&](int y0, int y1) {
+        for (int y = y0; y < y1; ++y) {
+            double dy = (y - hy) * step_src;
+            for (int x = 0; x < pw; ++x) {
+                double dx = (x - hx) * step_src;
+                double sx = lcx + dx * c_ang - dy * s_ang;
+                double sy = lcy + dx * s_ang + dy * c_ang;
+                int ix = std::clamp(static_cast<int>(std::floor(sx)), 0, rw - 1);
+                int iy = std::clamp(static_cast<int>(std::floor(sy)), 0, rh - 1);
+                int ix1 = std::min(rw - 1, ix + 1);
+                int iy1 = std::min(rh - 1, iy + 1);
+                double fx = sx - ix, fy = sy - iy;
+                double w00 = (1.0 - fx) * (1.0 - fy), w10 = fx * (1.0 - fy), w01 = (1.0 - fx) * fy, w11 = fx * fy;
+                size_t i00 = static_cast<size_t>(iy) * rw + ix;
+                size_t i10 = static_cast<size_t>(iy) * rw + ix1;
+                size_t i01 = static_cast<size_t>(iy1) * rw + ix;
+                size_t i11 = static_cast<size_t>(iy1) * rw + ix1;
+                size_t dst = static_cast<size_t>(y) * pw + x;
+                for (int c = 0; c < 3; ++c) {
+                    double val = w00 * reg_rgb[i00 * 3 + c] + w10 * reg_rgb[i10 * 3 + c]
+                               + w01 * reg_rgb[i01 * 3 + c] + w11 * reg_rgb[i11 * 3 + c];
+                    crop_rgb[dst * 3 + c] = static_cast<uint16_t>(std::clamp(std::lround(val), 0l, 65535l));
+                }
+                if (has_ir) {
+                    double iv = w00 * reg_ir[i00] + w10 * reg_ir[i10] + w01 * reg_ir[i01] + w11 * reg_ir[i11];
+                    crop_ir[dst] = static_cast<uint16_t>(std::clamp(std::lround(iv), 0l, 65535l));
+                }
             }
-            if (has_ir) {
-                double iv = w00 * reg_ir[i00] + w10 * reg_ir[i10] + w01 * reg_ir[i01] + w11 * reg_ir[i11];
-                crop_ir[dst] = static_cast<uint16_t>(std::clamp(std::lround(iv), 0l, 65535l));
-            }
+        }
+    });
+
+    std::vector<uint8_t> dmask;
+    const int auto_dil_nat = std::clamp(static_cast<int>(std::lround(dpi_x / 1100.0)), 1, 3);
+    if (out_ir_stats) out_ir_stats[3] = auto_dil_nat;
+
+    if (need_ir && has_ir && !crop_ir.empty()) {
+        const float eff_sens = (dev->ir_sensitivity >= 0.0f) ? dev->ir_sensitivity : ir_sensitivity;
+        const int eff_rad = std::max(8, static_cast<int>(std::lround((dpi_x * down) / 80.0)));
+        const int target_dil_nat = (dev->ir_dilate >= 0) ? std::clamp(dev->ir_dilate, 0, 8) : auto_dil_nat;
+        const int eff_dil = (target_dil_nat == 0) ? 0 : std::max(1, static_cast<int>(std::lround(target_dil_nat * down)));
+        const bool use_auto_shift = (dev->ir_auto_shift != 0);
+        const int man_dx = static_cast<int>(std::lround(dev->ir_shift_x * down));
+        const int man_dy = static_cast<int>(std::lround(dev->ir_shift_y * down));
+        int det_dx = 0, det_dy = 0, dust_px = 0;
+        compute_ir_dust_mask(
+            crop_ir.data(), pw, ph, eff_rad, eff_sens, eff_dil, dmask, crop_rgb.data(),
+            use_auto_shift, man_dx, man_dy, &det_dx, &det_dy, &dust_px
+        );
+        if (out_ir_stats) {
+            out_ir_stats[0] = use_auto_shift ? static_cast<int>(std::lround(det_dx / down)) : dev->ir_shift_x;
+            out_ir_stats[1] = use_auto_shift ? static_cast<int>(std::lround(det_dy / down)) : dev->ir_shift_y;
+            out_ir_stats[2] = dust_px;
         }
     }
 
-    if (apply_ir_clean && has_ir && !crop_ir.empty()) {
-        int eff_rad = std::max(8, static_cast<int>(std::lround((dpi_x * down) / 80.0)));
-        int eff_dil = std::clamp(static_cast<int>(std::lround((dpi_x * down) / 1100.0)), 1, 2);
-        std::vector<uint8_t> dmask;
-        compute_ir_dust_mask(crop_ir.data(), pw, ph, eff_rad, ir_sensitivity, eff_dil, dmask, crop_rgb.data());
-        inpaint_rgb16(crop_rgb.data(), dmask.data(), pw, ph, 48);
+    // Apply non-destructive manual heal/erase brush spots (works even on B&W / non-IR scans!)
+    if (spots && num_spots > 0) {
+        apply_manual_ir_spots(dmask, pw, ph, spots, num_spots);
+        if (out_ir_stats) {
+            int cnt = 0;
+            for (uint8_t v : dmask) if (v) ++cnt;
+            out_ir_stats[2] = cnt;
+        }
+    }
+
+    if ((apply_ir_clean || (spots && num_spots > 0)) && !dmask.empty()) {
+        inpaint_rgb16(crop_rgb.data(), dmask.data(), pw, ph, (down > 0.85) ? 64 : 48);
     }
 
     if (dev->enabled) {
         std::vector<float> f_rgb;
-        develop_rgb16_to_float(crop_rgb.data(), pw, ph, film_type, is_linear, *dev, 1.0f, f_rgb);
+        const float res_scale = std::clamp(static_cast<float>(dpi_x * down) / 1600.0f, 0.7f, 2.2f);
+        develop_rgb16_to_float(crop_rgb.data(), pw, ph, film_type, is_linear, *dev, res_scale, f_rgb, prev_threads);
         for (size_t i = 0; i < static_cast<size_t>(pw) * ph * 3; ++i) {
             out_rgb8[i] = static_cast<uint8_t>(std::clamp(std::lround(f_rgb[i] * 255.0f), 0l, 255l));
         }
     } else {
         render_rgb8_preview(crop_rgb.data(), pw, ph, film_type, is_linear, out_rgb8);
     }
+
+    // Optional magenta IR dust overlay directly on top of the developed image (synced with M / IR DUST)
+    if (dev->ir_show_mask && !dmask.empty()) {
+        const size_t npix = static_cast<size_t>(pw) * ph;
+        for (size_t i = 0; i < npix; ++i) {
+            if (dmask[i]) {
+                out_rgb8[i * 3 + 0] = static_cast<uint8_t>((out_rgb8[i * 3 + 0] * 35 + 255 * 65) / 100);
+                out_rgb8[i * 3 + 1] = static_cast<uint8_t>((out_rgb8[i * 3 + 1] * 35 +  77 * 65) / 100);
+                out_rgb8[i * 3 + 2] = static_cast<uint8_t>((out_rgb8[i * 3 + 2] * 35 + 255 * 65) / 100);
+            }
+        }
+    }
     return 0;
 }
 
 // V2 full-resolution 16-bit batch exporter supporting per-frame DevelopParams:
+//  - Parallelized across frames with lock-free work-stealing thread pool (up to 16 workers)
 //  - Optional 16-bit Linear/Gamma RAW TIFF (out_raw_tiff_paths[i])
 //  - Optional 16-bit Developed Positive TIFF (out_dev_tiff_paths[i])
 //  - Optional 8-bit Developed Positive PPM for JPEG conversion (out_jpg_ppm_paths[i])
@@ -2074,7 +2306,10 @@ int fc_export_frames_v2(
     int apply_ir_clean,
     float ir_sensitivity,
     int gamma_mode,
-    int film_type // 1=color_neg, 2=bw_neg, 3=slide
+    int film_type, // 1=color_neg, 2=bw_neg, 3=slide
+    const IrSpot* all_spots,
+    const int* spot_offsets,
+    const int* spot_counts
 ) {
     if (!src_path || num_frames <= 0 || !frames || !dev_params) return -1;
     LoadedScan scan;
@@ -2091,73 +2326,110 @@ int fc_export_frames_v2(
     const int ir_dilate = std::clamp(static_cast<int>(std::lround(scan.dpi_x / 1100.0f)), 1, 3);
     const float res_scale = std::clamp(scan.dpi_x / 1600.0f, 0.7f, 2.2f);
 
-    for (int i = 0; i < num_frames; ++i) {
-        int ow = 0, oh = 0;
-        std::vector<uint16_t> crop_rgb, crop_ir;
-        bilinear_crop_rotated(
-            scan.rgb.data(),
-            (apply_ir_clean && scan.has_ir) ? scan.ir.data() : nullptr,
-            static_cast<int>(scan.w),
-            static_cast<int>(scan.h),
-            frames[i],
-            ow,
-            oh,
-            crop_rgb,
-            crop_ir
-        );
+    const int hw = std::max(1, static_cast<int>(std::thread::hardware_concurrency()));
+    const int workers = std::min({num_frames, hw, 16});
+    std::atomic<int> next_idx{0};
+    std::atomic<int> first_err{0};
 
-        if (apply_ir_clean && scan.has_ir && !crop_ir.empty()) {
+    auto worker_fn = [&]() {
+        while (true) {
+            if (first_err.load(std::memory_order_relaxed) != 0) return;
+            int i = next_idx.fetch_add(1, std::memory_order_relaxed);
+            if (i >= num_frames) return;
+
+            int ow = 0, oh = 0;
+            std::vector<uint16_t> crop_rgb, crop_ir;
+            bilinear_crop_rotated(
+                scan.rgb.data(),
+                (apply_ir_clean && scan.has_ir) ? scan.ir.data() : nullptr,
+                static_cast<int>(scan.w),
+                static_cast<int>(scan.h),
+                frames[i],
+                ow,
+                oh,
+                crop_rgb,
+                crop_ir
+            );
+
             std::vector<uint8_t> dust_mask;
-            compute_ir_dust_mask(crop_ir.data(), ow, oh, ir_radius, ir_sensitivity, ir_dilate, dust_mask, crop_rgb.data());
-            inpaint_rgb16(crop_rgb.data(), dust_mask.data(), ow, oh, 64);
-        }
-
-        const bool want_dev_tiff = (out_dev_tiff_paths && out_dev_tiff_paths[i] && out_dev_tiff_paths[i][0]);
-        const bool want_jpg_ppm  = (out_jpg_ppm_paths  && out_jpg_ppm_paths[i]  && out_jpg_ppm_paths[i][0]);
-        const bool want_raw_tiff = (out_raw_tiff_paths && out_raw_tiff_paths[i] && out_raw_tiff_paths[i][0]);
-
-        if (want_dev_tiff || want_jpg_ppm) {
-            std::vector<float> dev_f;
-            if (dev_params[i].enabled) {
-                develop_rgb16_to_float(crop_rgb.data(), ow, oh, film_type, scan.is_linear_hdr, dev_params[i], res_scale, dev_f);
-            } else {
-                std::vector<uint8_t> tmp8(static_cast<size_t>(ow) * oh * 3);
-                render_rgb8_preview(crop_rgb.data(), ow, oh, film_type, scan.is_linear_hdr, tmp8.data());
-                dev_f.resize(tmp8.size());
-                for (size_t k = 0; k < tmp8.size(); ++k) dev_f[k] = tmp8[k] / 255.0f;
+            if (apply_ir_clean && scan.has_ir && !crop_ir.empty()) {
+                const float f_sens = (dev_params[i].ir_sensitivity >= 0.0f) ? dev_params[i].ir_sensitivity : ir_sensitivity;
+                const int f_dil = (dev_params[i].ir_dilate >= 0) ? std::clamp(dev_params[i].ir_dilate, 0, 8) : ir_dilate;
+                const bool f_auto_sh = (dev_params[i].ir_auto_shift != 0);
+                compute_ir_dust_mask(
+                    crop_ir.data(), ow, oh, ir_radius, f_sens, f_dil, dust_mask, crop_rgb.data(),
+                    f_auto_sh, dev_params[i].ir_shift_x, dev_params[i].ir_shift_y
+                );
+            }
+            const int n_sp = (all_spots && spot_offsets && spot_counts) ? spot_counts[i] : 0;
+            if (n_sp > 0) {
+                apply_manual_ir_spots(dust_mask, ow, oh, all_spots + spot_offsets[i], n_sp);
+            }
+            if (!dust_mask.empty()) {
+                inpaint_rgb16(crop_rgb.data(), dust_mask.data(), ow, oh, 64);
             }
 
-            if (want_dev_tiff) {
-                std::vector<uint16_t> dev16(dev_f.size());
-                for (size_t k = 0; k < dev_f.size(); ++k) dev16[k] = to_u16(dev_f[k]);
-                if (!write_tiff_rgb16(out_dev_tiff_paths[i], dev16.data(), static_cast<uint32_t>(ow), static_cast<uint32_t>(oh), scan.dpi_x, scan.dpi_y)) {
-                    return -(200 + i);
+            const bool want_dev_tiff = (out_dev_tiff_paths && out_dev_tiff_paths[i] && out_dev_tiff_paths[i][0]);
+            const bool want_jpg_ppm  = (out_jpg_ppm_paths  && out_jpg_ppm_paths[i]  && out_jpg_ppm_paths[i][0]);
+            const bool want_raw_tiff = (out_raw_tiff_paths && out_raw_tiff_paths[i] && out_raw_tiff_paths[i][0]);
+
+            if (want_dev_tiff || want_jpg_ppm) {
+                std::vector<float> dev_f;
+                if (dev_params[i].enabled) {
+                    develop_rgb16_to_float(crop_rgb.data(), ow, oh, film_type, scan.is_linear_hdr, dev_params[i], res_scale, dev_f, 1);
+                } else {
+                    std::vector<uint8_t> tmp8(static_cast<size_t>(ow) * oh * 3);
+                    render_rgb8_preview(crop_rgb.data(), ow, oh, film_type, scan.is_linear_hdr, tmp8.data());
+                    dev_f.resize(tmp8.size());
+                    for (size_t k = 0; k < tmp8.size(); ++k) dev_f[k] = tmp8[k] / 255.0f;
+                }
+
+                if (want_dev_tiff) {
+                    std::vector<uint16_t> dev16(dev_f.size());
+                    for (size_t k = 0; k < dev_f.size(); ++k) dev16[k] = to_u16(dev_f[k]);
+                    if (!write_tiff_rgb16(out_dev_tiff_paths[i], dev16.data(), static_cast<uint32_t>(ow), static_cast<uint32_t>(oh), scan.dpi_x, scan.dpi_y)) {
+                        int expected = 0;
+                        first_err.compare_exchange_strong(expected, -(200 + i));
+                        return;
+                    }
+                }
+                if (want_jpg_ppm) {
+                    std::vector<uint8_t> dev8(dev_f.size());
+                    for (size_t k = 0; k < dev_f.size(); ++k) {
+                        dev8[k] = static_cast<uint8_t>(std::clamp(std::lround(dev_f[k] * 255.0f), 0l, 255l));
+                    }
+                    FILE* fp = std::fopen(out_jpg_ppm_paths[i], "wb");
+                    if (fp) {
+                        std::fprintf(fp, "P6\n%d %d\n255\n", ow, oh);
+                        std::fwrite(dev8.data(), 1, dev8.size(), fp);
+                        std::fclose(fp);
+                    }
                 }
             }
-            if (want_jpg_ppm) {
-                std::vector<uint8_t> dev8(dev_f.size());
-                for (size_t k = 0; k < dev_f.size(); ++k) {
-                    dev8[k] = static_cast<uint8_t>(std::clamp(std::lround(dev_f[k] * 255.0f), 0l, 255l));
-                }
-                FILE* fp = std::fopen(out_jpg_ppm_paths[i], "wb");
-                if (fp) {
-                    std::fprintf(fp, "P6\n%d %d\n255\n", ow, oh);
-                    std::fwrite(dev8.data(), 1, dev8.size(), fp);
-                    std::fclose(fp);
-                }
-            }
-        }
 
-        if (want_raw_tiff) {
-            if (gamma_mode == 1 && scan.is_linear_hdr) {
-                for (uint16_t& px : crop_rgb) px = gamma_lut[px];
-            }
-            if (!write_tiff_rgb16(out_raw_tiff_paths[i], crop_rgb.data(), static_cast<uint32_t>(ow), static_cast<uint32_t>(oh), scan.dpi_x, scan.dpi_y)) {
-                return -(100 + i);
+            if (want_raw_tiff) {
+                if (gamma_mode == 1 && scan.is_linear_hdr) {
+                    for (uint16_t& px : crop_rgb) px = gamma_lut[px];
+                }
+                if (!write_tiff_rgb16(out_raw_tiff_paths[i], crop_rgb.data(), static_cast<uint32_t>(ow), static_cast<uint32_t>(oh), scan.dpi_x, scan.dpi_y)) {
+                    int expected = 0;
+                    first_err.compare_exchange_strong(expected, -(100 + i));
+                    return;
+                }
             }
         }
+    };
+
+    if (workers <= 1) {
+        worker_fn();
+    } else {
+        std::vector<std::thread> pool;
+        pool.reserve(static_cast<size_t>(workers - 1));
+        for (int t = 0; t < workers - 1; ++t) pool.emplace_back(worker_fn);
+        worker_fn();
+        for (auto& th : pool) th.join();
     }
-    return 0;
+    return first_err.load();
 }
 
 } // extern "C"

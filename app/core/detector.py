@@ -136,11 +136,15 @@ def _find_strip_horizontal_gate(
     fmt: FormatSpec,
     px_per_mm: float,
 ) -> tuple[float, float]:
-    """Find tight (gate_left, gate_right) in local strip coords.
+    """Find tight (gate_left, gate_right) in local strip coords by walking OUTWARD from inside the image.
 
-    Clears both dark plastic holder lips AND narrow unexposed film rebate bands
-    next to the sprockets, then pulls inward by ~0.20mm so we keep ~98% of the
-    real image width while virtually never overestimating into black/orange border.
+    Why outward instead of inward from the holder lane border:
+    On wide flatbed holders (e.g. Epson V750 4-strip holder), the central lens views outer
+    strips at an angle, illuminating the inner vertical bevel wall of the plastic holder
+    (parallax on Strip 1 left and Strips 3-4 right). Walking inward from the lane border
+    can trip on that high-variance bevel transition before reaching the unexposed film rebate.
+    Walking OUTWARD from the exposed interior hits the exact camera-gate -> film-rebate edge
+    first on every strip, making detection completely immune to holder bevel parallax.
     """
     sh, sw = strip_gray.shape
     y_pad = max(1, int(sh * 0.04))
@@ -150,69 +154,84 @@ def _find_strip_horizontal_gate(
     col_p50 = np.percentile(sub, 50, axis=0)
     col_p85 = np.percentile(sub, 85, axis=0)
     col_std = sub.std(axis=0)
+    col_vg = np.abs(np.diff(sub, axis=0)).mean(axis=0) if sub.shape[0] > 2 else np.zeros(sw, dtype=np.float32)
 
     c0, c1 = max(1, int(sw * 0.18)), max(2, int(sw * 0.82))
     core = sub[:, c0:c1]
-    rebate_lum = float(np.percentile(core, 96 if film_type != "slide" else 6))
-    core_std = float(np.median(col_std[c0:c1]))
-    core_p50 = float(np.median(col_p50[c0:c1]))
+    rebate_lum = float(np.percentile(core, 97 if film_type != "slide" else 4))
 
-    # Step 1: clear pitch-black plastic holder borders
-    holder_thresh = max(26.0, min(65.0, core_p50 * 0.45)) if film_type != "slide" else max(12.0, float(np.percentile(col_p85[c0:c1], 50)) * 0.25)
-    max_holder_walk = min(sw // 4, int(round(2.5 * px_per_mm)))
+    # Local interior reference bands (1.8mm .. 4.2mm inside each lane border)
+    r_in0 = min(sw // 3, max(3, int(round(1.8 * px_per_mm))))
+    r_in1 = min(sw // 2, max(r_in0 + 4, int(round(4.2 * px_per_mm))))
 
-    open_l = 0
-    while open_l < max_holder_walk and (col_p50[open_l] < holder_thresh or col_p85[open_l] < holder_thresh * 1.1):
-        open_l += 1
+    def find_edge(side: str) -> float | None:
+        if side == "left":
+            ref_slice = slice(r_in0, r_in1)
+            xs = range(r_in0, -1, -1)
+        else:
+            ref_slice = slice(sw - r_in1, sw - r_in0)
+            xs = range(sw - 1 - r_in0, sw)
 
-    open_r = sw - 1
-    while open_r > sw - 1 - max_holder_walk and (col_p50[open_r] < holder_thresh or col_p85[open_r] < holder_thresh * 1.1):
-        open_r -= 1
+        ref_p20 = float(np.median(col_p20[ref_slice]))
+        ref_p50 = float(np.median(col_p50[ref_slice]))
+        ref_std = float(np.median(col_std[ref_slice]))
+        ref_vg = float(np.median(col_vg[ref_slice]))
 
-    # Step 2: clear unexposed film-rebate band between holder lip and camera gate
-    max_reb_walk = int(round(2.0 * px_per_mm))
-    std_reb_max = max(10.5, core_std * 0.62)
+        for x in xs:
+            p20, p50, p85, st, vg = (
+                float(col_p20[x]),
+                float(col_p50[x]),
+                float(col_p85[x]),
+                float(col_std[x]),
+                float(col_vg[x]),
+            )
+            if film_type != "slide":
+                # 1. Dark holder lip / shadow transition
+                if p50 < min(65.0, ref_p50 * 0.65) or (p20 < min(36.0, ref_p20 * 0.68) and vg < ref_vg * 0.85):
+                    return float(x + 1) if side == "left" else float(x - 1)
+                # 2. Bright unexposed film rebate (sharp luminance jump toward film base)
+                lum_jump = (
+                    (rebate_lum - ref_p50 > 12.0)
+                    and (p50 > ref_p50 + 0.42 * (rebate_lum - ref_p50))
+                    and (p50 > rebate_lum - 22.0)
+                )
+                # 3. Dark/underexposed strip rebate (ref_p50 near rebate_lum -> rely on std + vertical gradient drop)
+                flat_rebate = (p50 > rebate_lum - 5.5) and (
+                    st < min(8.8, ref_std * 0.68)
+                    or (st < ref_std * 0.78 and vg < ref_vg * 0.80)
+                    or (vg < ref_vg * 0.74 and p20 > rebate_lum - 10.0)
+                )
+                sharp_vg_drop = (vg < ref_vg * 0.68) and (p50 > rebate_lum - 16.0 or p20 < ref_p20 * 0.75)
+                if lum_jump or flat_rebate or sharp_vg_drop:
+                    return float(x + 1) if side == "left" else float(x - 1)
+            else:
+                if p85 < rebate_lum + 14.0 and (st < min(8.8, ref_std * 0.68) or vg < ref_vg * 0.72):
+                    return float(x + 1) if side == "left" else float(x - 1)
+        return None
 
-    def is_side_rebate(x: int) -> bool:
-        if x < 0 or x >= sw:
-            return True
-        # Dark holder shadow transitional pixel
-        if col_p20[x] < max(24.0, holder_thresh * 0.85) and col_p50[x] < holder_thresh * 1.35:
-            return True
-        if film_type == "slide":
-            return bool(col_p85[x] < rebate_lum + 14.0 and col_std[x] < std_reb_max)
-        # Negative: bright uniform unexposed orange/clear base
-        near_base_all = col_p20[x] > (rebate_lum - 14.0) and col_p50[x] > (rebate_lum - 7.0)
-        near_base_med = col_p50[x] > (rebate_lum - 4.0) and col_std[x] < max(14.0, core_std * 0.72)
-        return bool((near_base_all and col_std[x] < max(16.0, core_std * 0.80)) or near_base_med)
+    gl = find_edge("left")
+    gr = find_edge("right")
+    if gl is None:
+        gl = 0.8 * px_per_mm
+    if gr is None:
+        gr = float(sw) - 0.8 * px_per_mm
 
-    gl = open_l
-    lim_l = min(sw // 2, open_l + max_reb_walk)
-    while gl < lim_l and is_side_rebate(gl):
-        gl += 1
+    # Tight inward safety pull (~0.14mm) keeps >98.5% of image while clearing edge halo
+    safety_x = 0.14 * px_per_mm
+    left = gl + safety_x
+    right = gr - safety_x
 
-    gr = open_r
-    lim_r = max(sw // 2, open_r - max_reb_walk)
-    while gr > lim_r and is_side_rebate(gr):
-        gr -= 1
-
-    # Step 3: apply tight inward safety pull (~0.20mm) and enforce physical camera gate bounds
-    safety_x = 0.20 * px_per_mm
-    left = float(gl) + safety_x
-    right = float(gr) - safety_x
-
-    max_w = (fmt.frame_w_mm - 0.15) * px_per_mm
+    max_w = (fmt.frame_w_mm - 0.10) * px_per_mm
     min_w = (fmt.frame_w_mm - 1.60) * px_per_mm
     w_det = right - left
 
     if w_det < min_w:
         # Fallback for an all-dark night strip: center safe nominal width inside illuminated opening
-        mid = 0.5 * (open_l + open_r)
-        safe_w = min(max(10.0, (open_r - open_l) - 0.70 * px_per_mm), (fmt.frame_w_mm - 0.35) * px_per_mm)
+        mid = 0.5 * (left + right)
+        safe_w = min(max(10.0, sw - 1.4 * px_per_mm), (fmt.frame_w_mm - 0.30) * px_per_mm)
         left = mid - 0.5 * safe_w
         right = mid + 0.5 * safe_w
     elif w_det > max_w:
-        # Never exceed physical camera gate width (prevents spilling into rebate on either side)
         mid = 0.5 * (left + right)
         left = mid - 0.5 * max_w
         right = mid + 0.5 * max_w
@@ -374,10 +393,13 @@ def _fit_periodic_frames_in_strip(
         if skip_empty and patch_empty and not is_empty_glass:
             continue
 
+        m_tilt = -math.tan(math.radians(float(strip["angle_deg"])))
+        cx_at_y = cx_local + (cy_local - 0.5 * h) * m_tilt
+
         frames.append(
             {
                 "strip_index": strip["index"],
-                "cx_prev": strip["x0"] + cx_local,
+                "cx_prev": strip["x0"] + cx_at_y,
                 "cy_prev": strip["y0"] + cy_local,
                 "w_prev": gate_w,
                 "h_prev": fh,

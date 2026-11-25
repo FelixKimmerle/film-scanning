@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FILM COCKPIT — V750 Scanner &amp; Frame Orchestrator</title>
+  <link rel="stylesheet" href="/styles/tokens.css">
+  <link rel="stylesheet" href="/styles/starter.css">
+  <link rel="stylesheet" href="/styles/cockpit.css">
+</head>
+<body>
+<div class="app-shell">
+  <!-- TOP MENU BAR -->
+  <header class="menubar">
+    <div><h1>FILM COCKPIT</h1></div>
+    <div class="status-cell">
+      <span class="lbl">V750</span>
+      <span id="usb-tag" class="status-tag warn">PROBING</span>
+    </div>
+    <div>
+      <span class="lbl">SCAN</span>
+      <select id="scan-select" aria-label="Active scan"></select>
+      <button id="btn-refresh" title="Refresh scan list">RELOAD</button>
+    </div>
+    <div class="status-cell">
+      <span class="lbl">JOB</span>
+      <span id="job-tag" class="status-tag ok">IDLE</span>
+      <span id="job-elapsed" class="val">0.0s</span>
+    </div>
+    <div class="right">
+      <button id="btn-del-raw" class="danger" title="Delete full raw holder scan after exporting frames">DEL RAW</button>
+      <button id="btn-save-layout" title="Save frame layout (Ctrl+S)">SAVE <span class="key">^S</span></button>
+      <button id="btn-export-top" class="btn-primary" title="Export cropped 16-bit TIFFs (E)">EXPORT <span class="key">E</span></button>
+    </div>
+  </header>
+
+  <!-- MAIN 3-COLUMN WORKSPACE -->
+  <main class="workspace">
+    <!-- LEFT DOCK: SCANNER + PREVIEW + EXPORT -->
+    <aside class="dock">
+      <!-- SCANNER ORCHESTRATOR PANEL -->
+      <section class="panel">
+        <div class="panel-head">
+          <span class="tab">SCANNER</span>
+          <span id="backend-note" class="dim" style="font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></span>
+        </div>
+        <div class="panel-body">
+          <div class="field">
+            <label for="in-backend">BACKEND</label>
+            <select id="in-backend">
+              <option value="silverfast">SILVERFAST 9 (EUR 0)</option>
+              <option value="vuescan">VUESCAN 9</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="in-roll">ROLL NAME</label>
+            <input id="in-roll" type="text" value="penfv_roll01" spellcheck="false">
+          </div>
+          <div class="field">
+            <label for="in-format">FORMAT</label>
+            <select id="in-format">
+              <option value="half_frame">35MM HALF-FRAME (PEN FV)</option>
+              <option value="full_frame">35MM FULL-FRAME</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="in-filmtype">FILM TYPE</label>
+            <select id="in-filmtype">
+              <option value="color_neg">COLOR NEGATIVE (C-41)</option>
+              <option value="bw_neg">B&amp;W NEGATIVE</option>
+              <option value="slide">SLIDE POSITIVE (E-6)</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="in-dpi">DPI</label>
+            <select id="in-dpi">
+              <option value="300">300 DPI (FAST TEST)</option>
+              <option value="600">600 DPI (DRAFT)</option>
+              <option value="1200">1200 DPI</option>
+              <option value="1600">1600 DPI</option>
+              <option value="2400" selected>2400 DPI (V750 OPTIMAL)</option>
+              <option value="3200">3200 DPI</option>
+              <option value="4800">4800 DPI (HEAVY)</option>
+            </select>
+          </div>
+          <div class="row">
+            <button id="tog-me" aria-pressed="false" class="grow" title="Multi-Exposure double pass for slides">MULTI-EXP</button>
+            <button id="tog-ir" aria-pressed="true" class="grow" title="Capture 16-bit hardware IR channel">IR CHANNEL</button>
+          </div>
+          <div class="row">
+            <button id="btn-scan" class="btn-primary grow">SCAN HOLDER</button>
+            <button id="btn-cancel-scan" class="danger" disabled>CANCEL</button>
+          </div>
+          <div class="bar"><div id="scan-bar"></div></div>
+          <div class="row" style="align-items:baseline;justify-content:space-between;gap:6px;">
+            <span id="scan-stage" class="dim" style="font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1 1 auto;">READY</span>
+            <span id="scan-pct" class="val" style="font-size:11px;flex:0 0 auto;">0%</span>
+          </div>
+          <div id="scan-logs" class="logbox"></div>
+        </div>
+      </section>
+
+      <!-- VIEW & DETECTION PANEL -->
+      <section class="panel">
+        <div class="panel-head">
+          <span class="tab">DETECT &amp; VIEW</span>
+        </div>
+        <div class="panel-body">
+          <div class="row">
+            <button id="btn-detect" class="btn-primary grow">AUTO-DETECT <span class="key">D</span></button>
+            <button id="btn-clear-frames" class="danger" title="Clear all frames">CLEAR</button>
+          </div>
+          <div class="range-row">
+            <label for="in-inset">INSET %</label>
+            <input id="in-inset" type="range" min="0" max="12" step="0.5" value="0.0">
+            <span id="val-inset" class="readout">0.0%</span>
+          </div>
+          <div class="row">
+            <button id="tog-invert" aria-pressed="false" class="grow" title="Cheap optical-density positive preview (I)">POSITIVE <span class="key">I</span></button>
+            <button id="tog-irmask" aria-pressed="false" class="grow" title="Overlay hardware IR dust mask (M)">IR DUST <span class="key">M</span></button>
+            <button id="tog-irraw" aria-pressed="false" title="View raw 16-bit IR channel (R)">IR <span class="key">R</span></button>
+          </div>
+          <div class="range-row">
+            <label for="in-irsens">IR SENS</label>
+            <input id="in-irsens" type="range" min="0.1" max="0.95" step="0.05" value="0.50">
+            <span id="val-irsens" class="readout">0.50</span>
+          </div>
+          <div class="row">
+            <button id="tog-skip-empty" aria-pressed="true" class="grow" title="Skip unloaded empty glass segments during detect">SKIP EMPTY</button>
+            <button id="btn-draw-mode" aria-pressed="false" class="grow" title="Draw manual frame box (B)">DRAW BOX <span class="key">B</span></button>
+          </div>
+        </div>
+      </section>
+
+      <!-- EXPORT PANEL -->
+      <section class="panel">
+        <div class="panel-head">
+          <span class="tab">EXPORT (16-BIT)</span>
+        </div>
+        <div class="panel-body">
+          <div class="field">
+            <label for="in-outdir">TARGET DIR</label>
+            <input id="in-outdir" type="text" value="" spellcheck="false" title="Local folder or mounted NAS path">
+          </div>
+          <div class="row">
+            <button id="tog-exp-ir" aria-pressed="true" class="grow" title="Apply 16-bit harmonic IR dust inpainting">IR CLEAN</button>
+            <button id="tog-exp-gamma" aria-pressed="false" class="grow" title="OFF = linear RAW (NLP); ON = gamma 2.2">GAMMA 2.2</button>
+          </div>
+          <div class="row">
+            <button id="tog-exp-proof" aria-pressed="true" class="grow" title="Also save cheap positive JPEG proofs alongside 16-bit TIFFs">+ POSITIVE JPG PROOFS</button>
+          </div>
+          <button id="btn-export" class="btn-primary">EXPORT ALL FRAMES <span class="key">E</span></button>
+          <div id="export-status" class="callout info" hidden>
+            <span class="tag">INFO</span>
+            <span id="export-status-text"></span>
+          </div>
+        </div>
+      </section>
+    </aside>
+
+    <!-- CENTER VIEWPORT: 60FPS CANVAS -->
+    <section class="panel viewport-panel">
+      <div class="viewport-head">
+        <span class="tab">VIEWPORT</span>
+        <span id="scan-meta" class="dim" style="font-size:12px;">NO SCAN LOADED</span>
+        <div class="right-tools">
+          <button id="btn-view-rot" title="Rotate viewport 90 deg for landscape inspection (L)">ROT VIEW <span class="key">L</span></button>
+          <button id="btn-prev-frame" title="Zoom to previous frame (P)">PREV <span class="key">P</span></button>
+          <button id="btn-next-frame" title="Zoom to next frame (N)">NEXT <span class="key">N</span></button>
+          <button id="btn-zoom-sel" title="Zoom selected frame to fit (Z)">ZOOM <span class="key">Z</span></button>
+          <button id="btn-fit" title="Fit full holder to viewport (F)">FIT <span class="key">F</span></button>
+          <button id="btn-100" title="Zoom 100% (1)">1:1 <span class="key">1</span></button>
+          <button id="btn-undo" title="Undo last edit (Ctrl+Z)">UNDO <span class="key">^Z</span></button>
+          <button id="btn-redo" title="Redo edit (Ctrl+Y / Ctrl+Shift+Z)" disabled>REDO <span class="key">^Y</span></button>
+          <button id="btn-add-grid" title="Stamp strip grid on active strip (G)">+ GRID <span class="key">G</span></button>
+          <button id="btn-del-frame" class="danger" title="Delete selected frame (Del)">DEL <span class="key">DEL</span></button>
+        </div>
+      </div>
+      <div id="viewport-wrap" class="viewport-wrap mode-select">
+        <canvas id="stage"></canvas>
+        <div id="hud-top-right" class="glass hud-top-right">
+          <span class="dim">MODE</span> <span id="hud-mode" class="key">SELECT</span>
+          <span class="dim">·</span>
+          <span class="dim">VIEW</span> <span id="hud-view" class="val">RAW</span>
+          <span class="dim">·</span>
+          <span class="dim">FRAMES</span> <span id="hud-count" class="val">0</span>
+        </div>
+        <div id="hud-bottom" class="glass hud-bottom">
+          <span class="dim">XY</span> <span id="hud-xy" class="val">--</span>
+          <span class="dim">·</span>
+          <span class="dim">ZOOM</span> <span id="hud-zoom" class="val">100%</span>
+          <span class="dim">·</span>
+          <span class="dim">SEL</span> <span id="hud-sel" class="val">NONE</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- RIGHT DOCK: STRIPS + SELECTED FRAME + FRAME LIST -->
+    <aside class="dock">
+      <section class="panel">
+        <div class="panel-head">
+          <span class="tab">SELECTED FRAME</span>
+        </div>
+        <div class="panel-body">
+          <dl class="kv" id="sel-kv">
+            <dt>ID</dt><dd id="kv-id" class="val">--</dd>
+            <dt>SIZE MM</dt><dd id="kv-mm" class="val">--</dd>
+            <dt>SIZE PX</dt><dd id="kv-px">--</dd>
+            <dt>CENTER</dt><dd id="kv-xy">--</dd>
+            <dt>ANGLE</dt><dd id="kv-ang" class="val">0.00 deg</dd>
+            <dt>EXPORT</dt><dd id="kv-rot90" class="val">0 deg</dd>
+            <dt>INSET</dt><dd id="kv-ins" class="val">0.0%</dd>
+          </dl>
+          <div class="nudge-grid" title="Nudge selected frame (hold Shift for whole strip)">
+            <button data-nudge="left" title="Left (ArrowLeft)">&larr;</button>
+            <button data-nudge="right" title="Right (ArrowRight)">&rarr;</button>
+            <button data-nudge="up" title="Up (ArrowUp)">&uarr;</button>
+            <button data-nudge="down" title="Down (ArrowDown)">&darr;</button>
+            <button data-nudge="ccw" title="Tilt -0.2 deg ([)">[</button>
+            <button data-nudge="cw" title="Tilt +0.2 deg (])">]</button>
+          </div>
+          <div class="row">
+            <button id="btn-exp-ccw" class="grow" title="Rotate exported frame 90 deg CCW (Q)">OUT -90 <span class="key">Q</span></button>
+            <button id="btn-exp-cw" class="grow" title="Rotate exported frame 90 deg CW (W)">OUT +90 <span class="key">W</span></button>
+          </div>
+          <div class="row">
+            <button id="btn-dup-frame" class="grow" title="Duplicate selected frame downward">DUP BELOW</button>
+            <button id="btn-rot-reset" title="Reset frame angle to 0">0 DEG</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <span class="tab">STRIPS</span>
+          <span class="dim" style="font-size:11px;">WHOLE-STRIP NUDGE</span>
+        </div>
+        <div class="panel-body" id="strips-container">
+          <div class="dim" style="font-size:12px;">RUN AUTO-DETECT TO POPULATE STRIPS</div>
+        </div>
+      </section>
+
+      <section class="panel" style="flex:1 1 auto;min-height:140px;display:flex;flex-direction:column;">
+        <div class="panel-head">
+          <span class="tab">FRAMES</span>
+          <span id="frame-list-count" class="val" style="font-size:12px;">0</span>
+        </div>
+        <div class="panel-body" style="flex:1 1 auto;min-height:0;">
+          <div id="frame-list" class="frame-list"></div>
+        </div>
+      </section>
+    </aside>
+  </main>
+
+  <!-- BOTTOM KEYBOARD HINT BAR -->
+  <footer class="statusbar">
+    <span><span class="key">L</span> ROT VIEW</span>
+    <span><span class="key">N/P</span> STEP FRAME</span>
+    <span><span class="key">Z</span> ZOOM SEL</span>
+    <span><span class="key">Q/W</span> OUT 90</span>
+    <span><span class="key">SHIFT+ARROWS</span> STRIP</span>
+    <span><span class="key">[ / ]</span> TILT</span>
+    <span><span class="key">I</span> POSITIVE</span>
+    <span><span class="key">M</span> IR DUST</span>
+    <span><span class="key">B</span> DRAW</span>
+    <span><span class="key">DEL</span> REMOVE</span>
+    <span id="status-msg" class="right">STANDALONE · NO LLM REQUIRED</span>
+  </footer>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+<script src="/app.js"></script>
+</body>
+</html>

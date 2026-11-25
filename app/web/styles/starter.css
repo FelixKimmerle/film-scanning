@@ -1,0 +1,312 @@
+/* Glass Cockpit — Starter Components
+   Requires tokens.css. Spec: ../DESIGN.md */
+
+/* ---------- Utilities ---------- */
+.dim { color: var(--dim); }
+.val { color: var(--value); }
+.key { color: var(--action); }
+.warn { color: var(--alert); }
+.error { color: var(--error); }
+
+.sw {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  background: var(--c);
+  margin-right: 0.6ch;
+}
+
+/* ---------- Buttons & Toggles ---------- */
+button,
+a.btnlink {
+  font: inherit;
+  color: var(--text);
+  background: var(--gray-dark);
+  border: 1px solid var(--gray-mid);
+  border-radius: 0;
+  padding: 1px 0.8ch;
+  cursor: pointer;
+  white-space: nowrap;
+  text-decoration: none;
+}
+button:hover,
+a.btnlink:hover { background: var(--action-dim); }
+button:active { background: var(--action-mid); }
+button[aria-pressed="true"] { background: var(--toggle-on); }
+button[aria-pressed="true"]:hover { background: var(--action-mid); }
+button[aria-pressed="false"],
+button .dim { color: var(--dim-on-panel); }
+button[aria-pressed="false"] .sw { opacity: 0.35; }
+button:disabled { background: var(--black); color: var(--gray-light); cursor: default; }
+
+button.danger:hover { background: var(--danger); }
+button.danger-on { background: var(--danger); }
+button.danger-on:hover { background: var(--danger-hover); }
+
+/* ---------- Inputs & Form Controls ---------- */
+input:not([type="checkbox"]):not([type="radio"]),
+select,
+textarea {
+  font: inherit;
+  color: var(--text);
+  background: var(--gray-dark);
+  border: 1px solid var(--gray-mid);
+  border-radius: 0;
+  padding: 3px 0.8ch;
+  caret-color: var(--action);
+}
+input:not([type="checkbox"]):not([type="radio"]):hover,
+select:hover,
+textarea:hover { background: var(--action-dim); }
+input:not([type="checkbox"]):not([type="radio"]):focus,
+select:focus,
+textarea:focus {
+  outline: 0;
+  border-color: var(--action);
+  background: var(--gray-dark);
+}
+input[aria-invalid="true"],
+select[aria-invalid="true"],
+textarea[aria-invalid="true"] {
+  border-color: var(--error);
+}
+.field-error { color: var(--error); font-size: 11px; margin-top: 2px; }
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: var(--toggle-on);
+  margin: 0 0.6ch 0 0;
+  vertical-align: -1px;
+}
+
+/* ---------- Menu Bar ---------- */
+.menubar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  background: var(--black);
+  border-bottom: 1px solid var(--gray-mid);
+}
+.menubar > * {
+  display: flex;
+  align-items: center;
+  gap: 0.6ch;
+  padding: 4px 1ch;
+  border-right: 1px solid var(--gray-mid);
+  white-space: nowrap;
+}
+.menubar h1 { font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; }
+.menubar .lbl { color: var(--dim); margin-right: 0.4ch; }
+.menubar .right {
+  margin-left: auto;
+  border-left: 1px solid var(--gray-mid);
+  border-right: 0;
+}
+
+/* ---------- Panel & Tab ---------- */
+.panel {
+  border: 1px solid var(--gray-mid);
+  background:
+    linear-gradient(var(--gray-mid), var(--gray-mid)) 0 calc(var(--tab-h) - 1px) / 100% 1px no-repeat,
+    var(--black);
+  min-width: 0;
+}
+.panel-head {
+  display: flex;
+  align-items: center;
+  gap: 1.5ch;
+  height: var(--tab-h);
+}
+.panel-body { padding: var(--pad); }
+
+.tab {
+  display: inline-block;
+  height: calc(var(--tab-h) - 1px);
+  padding: 3px 1ch 1px;
+  background: var(--tab);
+  box-shadow: inset 0 3px 0 var(--action);
+  font-weight: 700;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+/* ---------- Key/Value Readouts ---------- */
+.kv {
+  display: grid;
+  grid-template-columns: 9ch 1fr;
+  gap: 2px 1ch;
+  margin: 0;
+}
+.kv dt { color: var(--dim); text-transform: uppercase; }
+.kv dd { margin: 0; overflow-wrap: anywhere; }
+
+/* ---------- Tables ---------- */
+.tbl { border-collapse: collapse; width: 100%; }
+.tbl th {
+  text-align: left;
+  color: var(--dim);
+  background: var(--gray-dark);
+  padding: 2px 1ch;
+  text-transform: uppercase;
+}
+.tbl td {
+  padding: 2px 1ch;
+  border-top: 1px solid var(--line-subtle);
+}
+.tbl .num { text-align: right; }
+
+/* ---------- Progress Bar ---------- */
+.bar {
+  height: 6px;
+  border: 1px solid var(--gray-mid);
+  background: var(--black);
+}
+.bar > div {
+  height: 100%;
+  width: 0;
+  background: var(--value);
+}
+
+/* ---------- Badges & Empty States ---------- */
+.badge {
+  display: inline-block;
+  padding: 0 0.5ch;
+  font-size: 11px;
+  line-height: 15px;
+  text-transform: uppercase;
+  background: rgba(8, 8, 8, 0.8);
+  border: 1px solid var(--gray-mid);
+  color: var(--text);
+}
+.empty {
+  padding: 60px 1ch;
+  color: var(--dim);
+  text-align: center;
+  text-transform: uppercase;
+}
+.empty code { color: var(--action); text-transform: none; }
+
+/* ---------- Floating Glass HUD ---------- */
+.glass {
+  background: rgba(8, 8, 8, 0.78);
+  backdrop-filter: blur(10px) saturate(1.2);
+  border: 1px solid var(--gray-mid);
+  box-shadow: 0 0 0 1px var(--black), 0 8px 30px rgba(0, 0, 0, 0.6);
+}
+
+/* ---------- Floating Menus, Modal Sheets & Toast ---------- */
+.popover {
+  background: var(--black);
+  border: 1px solid var(--action);
+  box-shadow: 0 0 0 1px var(--black), 0 12px 40px rgba(0, 0, 0, 0.7);
+}
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 110;
+  background: rgba(0, 0, 0, 0.8);
+  display: grid;
+  place-items: start center;
+  padding: calc(0.06 * var(--vh)) 10px 10px;
+  overflow-y: auto;
+}
+.sheet {
+  width: min(820px, 100%);
+  border: 1px solid var(--gray-mid);
+  background: var(--black);
+  box-shadow: 0 0 0 1px var(--black);
+}
+.sheet.ask {
+  width: min(460px, 100%);
+  border-color: var(--action);
+}
+.sheet .head {
+  display: flex;
+  height: var(--tab-h);
+  border-bottom: 1px solid var(--gray-mid);
+}
+.sheet .head .tab { margin-right: auto; }
+.sheet .head button { border: 0; border-left: 1px solid var(--gray-mid); }
+.sheet-body {
+  padding: 8px 1ch 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.toast {
+  position: fixed;
+  z-index: 140;
+  top: 44px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: calc(var(--vw) - 20px);
+  padding: 4px 1.2ch;
+  color: var(--text);
+  background: rgba(8, 8, 8, 0.9);
+  backdrop-filter: blur(10px);
+  border: 1px solid var(--action);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.6);
+}
+
+/* ---------- Callouts / Status Banners ---------- */
+.callout {
+  display: flex;
+  gap: 1ch;
+  align-items: baseline;
+  padding: 4px 1ch 4px calc(1ch + 3px);
+  border: 1px solid var(--gray-mid);
+  background: var(--black);
+  box-shadow: inset 3px 0 0 var(--action);
+}
+.callout .tag { font-weight: 700; text-transform: uppercase; flex: none; }
+.callout.info { box-shadow: inset 3px 0 0 var(--action); }
+.callout.info .tag { color: var(--action); }
+.callout.ok { background: var(--value-bg); box-shadow: inset 3px 0 0 var(--value); }
+.callout.ok .tag { color: var(--value); }
+.callout.warn { background: var(--alert-dim); box-shadow: inset 3px 0 0 var(--alert); }
+.callout.warn .tag { color: var(--alert); }
+.callout.err { background: var(--danger); box-shadow: inset 3px 0 0 var(--error); }
+.callout.err .tag { color: var(--error); }
+
+/* ---------- Tree Views ---------- */
+.tree,
+.tree ul { list-style: none; margin: 0; padding: 0; }
+.tree ul { margin-left: 1ch; padding-left: 1ch; border-left: 1px solid var(--line-subtle); }
+.tree-row { display: flex; align-items: center; gap: 0.6ch; padding: 1px 0.6ch; cursor: pointer; }
+.tree-row:hover { background: var(--action-dim); }
+.tree-row[aria-selected="true"] { background: var(--toggle-on); }
+
+/* ---------- Command Palette ---------- */
+.cmd-list { max-height: min(50vh, 360px); overflow-y: auto; border-top: 1px solid var(--gray-mid); }
+.cmd-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 2ch;
+  width: 100%;
+  border: 0;
+  border-bottom: 1px solid var(--line-subtle);
+  background: var(--black);
+  padding: 4px 1ch;
+  text-align: left;
+}
+.cmd-item:hover,
+.cmd-item[aria-selected="true"] { background: var(--action-dim); }
+
+/* ---------- Prose / Low-Halation Body ---------- */
+.prose { color: var(--text-body); }
+
+/* ---------- Touch Ergonomics (coarse pointers only) ---------- */
+@media (pointer: coarse) {
+  button,
+  a.btnlink,
+  input:not([type="checkbox"]):not([type="radio"]),
+  select,
+  .cmd-item,
+  .tree-row {
+    min-height: 34px;
+  }
+}

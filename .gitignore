@@ -1,0 +1,35 @@
+# Local scanner data, Wine prefixes, licenses, and caches
+silverfast-data/
+silverfast-cache/
+silverfast-linux/
+silverfast-bin/
+silverfast-release/
+vuescan_home/
+.sf_staging/
+.vuescan_staging/
+
+# Film scans, layouts, and exported frames
+scans/
+exports/
+
+# Proprietary vendor drivers/installers
+*.exe
+*.zip
+*.tar.gz
+*.tif
+*.tiff
+
+# Logs and debug captures
+*.log
+silverfast_last_err.png
+
+# C++ / nobcpp build artifacts
+nobcpp
+build/
+compile_commands.json
+
+# Python caches
+__pycache__/
+*.py[cod]
+.venv/
+venv/

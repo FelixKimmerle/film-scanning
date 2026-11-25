@@ -1,0 +1,24 @@
+{
+  "id": "epson-perfection-v700-v750",
+  "name": "EPSON Perfection V700/V750",
+  "vendor": "EPSON",
+  "usb": "04b8:012c",
+  "status": "experimental",
+  "tested": "Generated from Epson Scan 3.9.2.2 for V700/V750",
+  "registry": {
+    "inf": "es63.inf",
+    "install_section": "USB.ES63NT6.x64",
+    "device_type": 1,
+    "device_subtype": 1,
+    "capabilities": 19,
+    "device_data": {
+      "TwainDS": "EPSON Perfection V700/V750",
+      "Model": "EPSON Perfection V700/V750",
+      "NumButtons": "1,1",
+      "HOptRes": "6400,1",
+      "VOptRes": "6400,1",
+      "ModelCode": "ES0063",
+      "OptionCaps": "0x100,1"
+    }
+  }
+}

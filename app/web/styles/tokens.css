@@ -1,0 +1,102 @@
+/* Glass Cockpit — Design Tokens & Base Reset
+   Spec: ../DESIGN.md */
+
+@font-face {
+  font-family: "Ioskeley Mono";
+  font-weight: 400;
+  src: url("../fonts/ioskeley-mono-regular.woff2") format("woff2");
+  font-display: swap;
+  /* Exclude arrows (U+2190-21FF), ellipsis (U+2026) and geometric shapes
+     (U+25A0-25FF): Ioskeley draws them two cells wide on a one-cell advance,
+     so let the fallback monospace render them. Box drawing (U+2500-259F) is safe. */
+  unicode-range: U+0020-007E, U+00A0-017F, U+2010-2025, U+2027-203A, U+20AC, U+2122, U+2212, U+2500-259F;
+}
+
+@font-face {
+  font-family: "Ioskeley Mono";
+  font-weight: 700;
+  src: url("../fonts/ioskeley-mono-bold.woff2") format("woff2");
+  font-display: swap;
+  unicode-range: U+0020-007E, U+00A0-017F, U+2010-2025, U+2027-203A, U+20AC, U+2122, U+2212, U+2500-259F;
+}
+
+:root {
+  color-scheme: dark;
+
+  /* Monochrome scaffolding */
+  --black: #080808;
+  --bg-dim: #0d0d0d;
+  --gray-dark: #1f1f1f;
+  --line-subtle: #262626;
+  --gray-mid: #404040;
+  --tab: #4d4d4d;
+  --gray-light: #666666;     /* non-text / disabled only (3.5:1) */
+  --dim: #808080;            /* on --black only (5.1:1) */
+  --dim-on-panel: #999999;   /* on --gray-dark surfaces (5.8:1) */
+  --text-body: #e6e6e6;      /* optional low-halation prose text (16.0:1) */
+  --text: #ffffff;
+
+  /* Semantic accents */
+  --action: #00ffff;
+  --action-dim: #005959;
+  --action-mid: #008085;
+  --toggle-on: #00616b;
+  --action-trans: rgba(0, 255, 255, 0.3);
+
+  --value: #00ff00;
+  --value-dim: #006600;
+  --value-bg: #003d00;
+
+  --alert: #ffff00;
+  --alert-dim: #4a3b00;
+  --error: #ff7366;
+  --danger: #5a1f1a;
+  --danger-hover: #7a2a22;
+  --link: #8cbfff;
+
+  /* Categorical palette (OkLCH-spaced, AAA >= 7.4:1, clear of cyan/green/yellow) */
+  --cat-1: #ff4dff;
+  --cat-2: #ffa31a;
+  --cat-3: #4da6ff;
+  --cat-4: #b18cff;
+  --cat-5: #ff6b8b;
+  --cat-6: #d9b38c;
+  --cat-7: #e0e0e0;
+  --cat-8: #ff7a33;
+  --cat-9: #7d9cff;
+  --cat-10: #e080ff;
+  --cat-11: #ffb8cc;
+  --cat-12: #d4b44a;
+
+  /* Typography & geometry */
+  --mono: "Ioskeley Mono", ui-monospace, "DejaVu Sans Mono", Menlo, Consolas, monospace;
+  --tab-h: 22px;
+  --pad: 6px;
+
+  /* Per-device UI scaling: use --vw / --vh instead of vw / vh when zoomed */
+  --ui: 1;
+  --vw: calc(100vw / var(--ui));
+  --vh: calc(100vh / var(--ui));
+}
+
+* { box-sizing: border-box; }
+html {
+  -webkit-text-size-adjust: 100%;
+  scrollbar-color: var(--gray-mid) var(--black);
+  zoom: var(--ui);
+}
+body {
+  margin: 0;
+  background: var(--black);
+  color: var(--text);
+  font: 13px/1.4 var(--mono);
+}
+
+h1, h2, h3 { font-size: inherit; margin: 0; }
+[hidden] { display: none !important; }
+
+::selection { background: var(--action-trans); }
+:focus-visible { outline: 2px solid var(--alert); outline-offset: 0; }
+
+a { color: var(--link); text-decoration: underline 1px; text-underline-offset: 2px; }
+a:hover { background: var(--action-dim); color: var(--text); }

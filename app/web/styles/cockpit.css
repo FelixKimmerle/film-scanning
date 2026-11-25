@@ -39,22 +39,45 @@ html, body {
 .status-tag.warn { color: var(--alert); background: var(--alert-dim); border-color: var(--alert); }
 .status-tag.err { color: var(--error); background: var(--danger); border-color: var(--error); }
 
-/* Workspace: Left control dock | Center 60fps canvas | Right frame inspector */
+/* Workspace: Left control dock | splitter | Center 60fps canvas | splitter | Right frame inspector */
 .workspace {
   display: grid;
-  grid-template-columns: 310px 1fr 270px;
-  gap: 4px;
+  grid-template-columns: var(--left-w, 340px) 6px minmax(280px, 1fr) 6px var(--right-w, 270px);
+  gap: 0;
   padding: 4px;
   min-height: 0;
   overflow: hidden;
+}
+
+.splitter {
+  position: relative;
+  cursor: col-resize;
+  background: transparent;
+  user-select: none;
+  touch-action: none;
+}
+.splitter::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 2px;
+  background: var(--line-subtle);
+}
+.splitter:hover::after,
+.splitter.dragging::after {
+  background: var(--action);
 }
 
 .dock {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  min-width: 0;
   min-height: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   padding-right: 1px;
 }
 
@@ -167,16 +190,21 @@ input[type="range"]::-moz-range-thumb {
 }
 .btn-group button:first-child { margin-left: 0; }
 
-/* Log console inside Scanner panel */
+/* Log console inside Scanner panel (vertically resizable) */
 .logbox {
   background: var(--bg-dim);
   border: 1px solid var(--line-subtle);
-  padding: 4px 0.8ch;
-  height: 86px;
+  padding: 5px 0.8ch;
+  height: 155px;
+  min-height: 90px;
+  max-height: 480px;
+  resize: vertical;
   overflow-y: auto;
   font-size: 11px;
-  line-height: 1.35;
+  line-height: 1.4;
   color: var(--text-body);
+  white-space: pre-wrap;
+  word-break: break-word;
   user-select: text;
 }
 .logbox .log-err { color: var(--error); }
@@ -304,6 +332,75 @@ canvas#stage {
 .frame-row:first-child { border-top: 0; }
 .frame-row:hover { background: var(--action-dim); }
 .frame-row.selected { background: var(--toggle-on); color: var(--text); }
+
+/* Right Dock Mode Tabs: [ CROP ] | [ DEVELOP ] */
+.dock-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0;
+  border: 1px solid var(--gray-mid);
+  background: var(--black);
+  flex: 0 0 auto;
+}
+.dock-tabs button {
+  border: 0;
+  border-right: 1px solid var(--gray-mid);
+  padding: 5px 0;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  background: var(--black);
+  color: var(--dim);
+}
+.dock-tabs button:last-child { border-right: 0; }
+.dock-tabs button[aria-selected="true"] {
+  background: var(--toggle-on);
+  color: var(--action);
+}
+.dock-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.dock-pane[hidden] { display: none; }
+
+/* Live Develop Preview Overlay inside Center Viewport */
+.dev-stage-wrap {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #050505;
+  padding: 18px;
+  overflow: hidden;
+  z-index: 4;
+}
+.dev-stage-wrap[hidden] { display: none; }
+#dev-canvas {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border: 1px solid var(--line-subtle);
+  background: #000;
+}
+.dev-stage-wrap.wb-pick #dev-canvas {
+  cursor: crosshair;
+}
+.dev-hud {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 6;
+  padding: 3px 0.8ch;
+  font-size: 11px;
+  display: flex;
+  align-items: center;
+  gap: 0.8ch;
+  pointer-events: none;
+}
 
 /* Bottom shortcut bar */
 .statusbar {

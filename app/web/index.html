@@ -54,7 +54,7 @@
           </div>
           <div class="field">
             <label for="in-roll">ROLL NAME</label>
-            <input id="in-roll" type="text" value="penfv_roll01" spellcheck="false">
+            <input id="in-roll" type="text" value="" placeholder="e.g. roll01_portra400" spellcheck="false">
           </div>
           <div class="field">
             <label for="in-format">FORMAT</label>
@@ -79,8 +79,9 @@
               <option value="1200">1200 DPI</option>
               <option value="1600">1600 DPI</option>
               <option value="2400" selected>2400 DPI (V750 OPTIMAL)</option>
-              <option value="3200">3200 DPI</option>
-              <option value="4800">4800 DPI (HEAVY)</option>
+              <option value="3000">3000 DPI (MAX 1-PASS HDRi)</option>
+              <option value="3200">3200 DPI (AUTO-SPLIT 2x)</option>
+              <option value="4800">4800 DPI (AUTO-SPLIT 4x)</option>
             </select>
           </div>
           <div class="row">
@@ -143,11 +144,29 @@
             <input id="in-outdir" type="text" value="" spellcheck="false" title="Local folder or mounted NAS path">
           </div>
           <div class="row">
-            <button id="tog-exp-ir" aria-pressed="true" class="grow" title="Apply 16-bit harmonic IR dust inpainting">IR CLEAN</button>
-            <button id="tog-exp-gamma" aria-pressed="false" class="grow" title="OFF = linear RAW (NLP); ON = gamma 2.2">GAMMA 2.2</button>
+            <button id="tog-exp-ir" aria-pressed="true" class="grow" title="Apply V2 16-bit IR dust cleaning + grain match">IR CLEAN</button>
+            <button id="tog-exp-gamma" aria-pressed="false" class="grow" title="For RAW TIFF: OFF = linear (NLP); ON = gamma 2.2">GAMMA 2.2</button>
           </div>
           <div class="row">
-            <button id="tog-exp-proof" aria-pressed="true" class="grow" title="Also save cheap positive JPEG proofs alongside 16-bit TIFFs">+ POSITIVE JPG PROOFS</button>
+            <button id="tog-exp-raw" aria-pressed="true" class="grow" title="Save 16-bit RAW negative TIFF (open pipeline for Darktable/NLP)">RAW 16B</button>
+            <button id="tog-exp-dev-tiff" aria-pressed="false" class="grow" title="Save 16-bit developed positive TIFF">DEV 16B</button>
+            <button id="tog-exp-proof" aria-pressed="true" class="grow" title="Save developed positive JPEG">DEV JPG</button>
+          </div>
+          <div class="field">
+            <label for="in-jpg-size">JPG SIZE</label>
+            <select id="in-jpg-size">
+              <option value="0" selected>FULL NATIVE</option>
+              <option value="2400">2400 PX (LANCZOS)</option>
+              <option value="2048">2048 PX (WEB/IG)</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="in-camera">CAMERA</label>
+            <input id="in-camera" type="text" value="" placeholder="e.g. Olympus Pen FV" spellcheck="false">
+          </div>
+          <div class="field">
+            <label for="in-stock">FILM STOCK</label>
+            <input id="in-stock" type="text" value="" placeholder="e.g. Kodak Gold 200" spellcheck="false">
           </div>
           <button id="btn-export" class="btn-primary">EXPORT ALL FRAMES <span class="key">E</span></button>
           <div id="export-status" class="callout info" hidden>
@@ -158,15 +177,17 @@
       </section>
     </aside>
 
-    <!-- CENTER VIEWPORT: 60FPS CANVAS -->
+    <div id="split-left" class="splitter" title="Drag to resize left dock (double-click to reset)"></div>
+
+    <!-- CENTER VIEWPORT: 60FPS CANVAS + DEVELOP LIVE STAGE -->
     <section class="panel viewport-panel">
       <div class="viewport-head">
         <span class="tab">VIEWPORT</span>
         <span id="scan-meta" class="dim" style="font-size:12px;">NO SCAN LOADED</span>
         <div class="right-tools">
           <button id="btn-view-rot" title="Rotate viewport 90 deg for landscape inspection (L)">ROT VIEW <span class="key">L</span></button>
-          <button id="btn-prev-frame" title="Zoom to previous frame (P)">PREV <span class="key">P</span></button>
-          <button id="btn-next-frame" title="Zoom to next frame (N)">NEXT <span class="key">N</span></button>
+          <button id="btn-prev-frame" title="Previous frame (P)">PREV <span class="key">P</span></button>
+          <button id="btn-next-frame" title="Next frame (N)">NEXT <span class="key">N</span></button>
           <button id="btn-zoom-sel" title="Zoom selected frame to fit (Z)">ZOOM <span class="key">Z</span></button>
           <button id="btn-fit" title="Fit full holder to viewport (F)">FIT <span class="key">F</span></button>
           <button id="btn-100" title="Zoom 100% (1)">1:1 <span class="key">1</span></button>
@@ -178,6 +199,17 @@
       </div>
       <div id="viewport-wrap" class="viewport-wrap mode-select">
         <canvas id="stage"></canvas>
+        <div id="dev-stage-wrap" class="dev-stage-wrap" hidden>
+          <canvas id="dev-canvas"></canvas>
+          <div id="dev-hud" class="glass dev-hud">
+            <span class="dim">DEVELOP</span>
+            <span id="dev-hud-frame" class="val">--</span>
+            <span class="dim">·</span>
+            <span id="dev-hud-prof" class="key">FRONTIER</span>
+            <span class="dim">·</span>
+            <span id="dev-hud-state" class="dim">READY</span>
+          </div>
+        </div>
         <div id="hud-top-right" class="glass hud-top-right">
           <span class="dim">MODE</span> <span id="hud-mode" class="key">SELECT</span>
           <span class="dim">·</span>
@@ -190,80 +222,188 @@
           <span class="dim">·</span>
           <span class="dim">ZOOM</span> <span id="hud-zoom" class="val">100%</span>
           <span class="dim">·</span>
-          <span class="dim">SEL</span> <span id="hud-sel" class="val">NONE</span>
+          <span id="hud-sel" class="val">NONE</span>
         </div>
       </div>
     </section>
 
-    <!-- RIGHT DOCK: STRIPS + SELECTED FRAME + FRAME LIST -->
+    <div id="split-right" class="splitter" title="Drag to resize right dock (double-click to reset)"></div>
+
+    <!-- RIGHT DOCK: [ CROP ] | [ DEVELOP ] -->
     <aside class="dock">
-      <section class="panel">
-        <div class="panel-head">
-          <span class="tab">SELECTED FRAME</span>
-        </div>
-        <div class="panel-body">
-          <dl class="kv" id="sel-kv">
-            <dt>ID</dt><dd id="kv-id" class="val">--</dd>
-            <dt>SIZE MM</dt><dd id="kv-mm" class="val">--</dd>
-            <dt>SIZE PX</dt><dd id="kv-px">--</dd>
-            <dt>CENTER</dt><dd id="kv-xy">--</dd>
-            <dt>ANGLE</dt><dd id="kv-ang" class="val">0.00 deg</dd>
-            <dt>EXPORT</dt><dd id="kv-rot90" class="val">0 deg</dd>
-            <dt>INSET</dt><dd id="kv-ins" class="val">0.0%</dd>
-          </dl>
-          <div class="nudge-grid" title="Nudge selected frame (hold Shift for whole strip)">
-            <button data-nudge="left" title="Left (ArrowLeft)">&larr;</button>
-            <button data-nudge="right" title="Right (ArrowRight)">&rarr;</button>
-            <button data-nudge="up" title="Up (ArrowUp)">&uarr;</button>
-            <button data-nudge="down" title="Down (ArrowDown)">&darr;</button>
-            <button data-nudge="ccw" title="Tilt -0.2 deg ([)">[</button>
-            <button data-nudge="cw" title="Tilt +0.2 deg (])">]</button>
-          </div>
-          <div class="row">
-            <button id="btn-exp-ccw" class="grow" title="Rotate exported frame 90 deg CCW (Q)">OUT -90 <span class="key">Q</span></button>
-            <button id="btn-exp-cw" class="grow" title="Rotate exported frame 90 deg CW (W)">OUT +90 <span class="key">W</span></button>
-          </div>
-          <div class="row">
-            <button id="btn-dup-frame" class="grow" title="Duplicate selected frame downward">DUP BELOW</button>
-            <button id="btn-rot-reset" title="Reset frame angle to 0">0 DEG</button>
-          </div>
-        </div>
-      </section>
+      <div class="dock-tabs" role="tablist">
+        <button id="tab-crop" role="tab" aria-selected="true" title="Crop borders & strip grid (Tab)">CROP</button>
+        <button id="tab-develop" role="tab" aria-selected="false" title="Film Lab color, WB, denoise & preview (Tab)">DEVELOP</button>
+      </div>
 
-      <section class="panel">
-        <div class="panel-head">
-          <span class="tab">STRIPS</span>
-          <span class="dim" style="font-size:11px;">WHOLE-STRIP NUDGE</span>
-        </div>
-        <div class="panel-body" id="strips-container">
-          <div class="dim" style="font-size:12px;">RUN AUTO-DETECT TO POPULATE STRIPS</div>
-        </div>
-      </section>
+      <!-- PANE 1: CROP & STRIPS -->
+      <div id="pane-crop" class="dock-pane">
+        <section class="panel">
+          <div class="panel-head">
+            <span class="tab">SELECTED FRAME</span>
+          </div>
+          <div class="panel-body">
+            <dl class="kv" id="sel-kv">
+              <dt>ID</dt><dd id="kv-id" class="val">--</dd>
+              <dt>SIZE MM</dt><dd id="kv-mm" class="val">--</dd>
+              <dt>SIZE PX</dt><dd id="kv-px">--</dd>
+              <dt>CENTER</dt><dd id="kv-xy">--</dd>
+              <dt>ANGLE</dt><dd id="kv-ang" class="val">0.00 deg</dd>
+              <dt>EXPORT</dt><dd id="kv-rot90" class="val">0 deg</dd>
+              <dt>INSET</dt><dd id="kv-ins" class="val">0.0%</dd>
+            </dl>
+            <div class="nudge-grid" title="Nudge selected frame (hold Shift for whole strip)">
+              <button data-nudge="left" title="Left (ArrowLeft)">&larr;</button>
+              <button data-nudge="right" title="Right (ArrowRight)">&rarr;</button>
+              <button data-nudge="up" title="Up (ArrowUp)">&uarr;</button>
+              <button data-nudge="down" title="Down (ArrowDown)">&darr;</button>
+              <button data-nudge="ccw" title="Tilt -0.2 deg ([)">[</button>
+              <button data-nudge="cw" title="Tilt +0.2 deg (])">]</button>
+            </div>
+            <div class="row">
+              <button id="btn-exp-ccw" class="grow" title="Rotate exported frame 90 deg CCW (Q)">OUT -90 <span class="key">Q</span></button>
+              <button id="btn-exp-cw" class="grow" title="Rotate exported frame 90 deg CW (W)">OUT +90 <span class="key">W</span></button>
+            </div>
+            <div class="row">
+              <button id="btn-dup-frame" class="grow" title="Duplicate selected frame downward">DUP BELOW</button>
+              <button id="btn-rot-reset" title="Reset frame angle to 0">0 DEG</button>
+            </div>
+          </div>
+        </section>
 
-      <section class="panel" style="flex:1 1 auto;min-height:140px;display:flex;flex-direction:column;">
-        <div class="panel-head">
-          <span class="tab">FRAMES</span>
-          <span id="frame-list-count" class="val" style="font-size:12px;">0</span>
-        </div>
-        <div class="panel-body" style="flex:1 1 auto;min-height:0;">
-          <div id="frame-list" class="frame-list"></div>
-        </div>
-      </section>
+        <section class="panel">
+          <div class="panel-head">
+            <span class="tab">STRIPS</span>
+            <span class="dim" style="font-size:11px;">WHOLE-STRIP NUDGE</span>
+          </div>
+          <div class="panel-body" id="strips-container">
+            <div class="dim" style="font-size:12px;">RUN AUTO-DETECT TO POPULATE STRIPS</div>
+          </div>
+        </section>
+
+        <section class="panel" style="flex:1 1 auto;min-height:140px;display:flex;flex-direction:column;">
+          <div class="panel-head">
+            <span class="tab">FRAMES</span>
+            <span id="frame-list-count" class="val" style="font-size:12px;">0</span>
+          </div>
+          <div class="panel-body" style="flex:1 1 auto;min-height:0;">
+            <div id="frame-list" class="frame-list"></div>
+          </div>
+        </section>
+      </div>
+
+      <!-- PANE 2: FILM LAB DEVELOP -->
+      <div id="pane-develop" class="dock-pane" hidden>
+        <section class="panel">
+          <div class="panel-head">
+            <span class="tab">FILM LAB</span>
+            <span id="dev-base-readout" class="dim" style="font-size:11px;">BASE: AUTO</span>
+          </div>
+          <div class="panel-body">
+            <div class="field">
+              <label for="dev-profile">PROFILE</label>
+              <select id="dev-profile">
+                <option value="frontier" selected>FRONTIER (PUNCHY)</option>
+                <option value="noritsu">NORITSU (SMOOTH)</option>
+                <option value="natural">NATURAL (CLEAN)</option>
+                <option value="warm">WARM (PORTRA)</option>
+                <option value="bw_classic">B&amp;W CLASSIC</option>
+              </select>
+            </div>
+            <div class="row">
+              <button id="dev-autowb" aria-pressed="true" class="grow" title="Per-frame density White Balance">AUTO WB</button>
+              <button id="dev-wb-pick" aria-pressed="false" class="grow" title="Click a neutral gray pixel in preview to set Temp/Tint">WB PICK</button>
+            </div>
+            <div class="row">
+              <button id="dev-ir-prev" aria-pressed="false" class="grow" title="Preview V2 IR dust cleaning live (slightly slower)">IR PREV</button>
+              <button id="dev-before" aria-pressed="false" class="grow" title="Compare raw proof vs developed (hold Backslash)">BEFORE <span class="key">\</span></button>
+            </div>
+            <div class="range-row">
+              <label for="dev-exp">EXPOSURE</label>
+              <input id="dev-exp" type="range" min="-2.0" max="2.0" step="0.05" value="0.0">
+              <span id="val-dev-exp" class="readout">0.00</span>
+            </div>
+            <div class="range-row">
+              <label for="dev-con">CONTRAST</label>
+              <input id="dev-con" type="range" min="0.60" max="1.60" step="0.02" value="1.00">
+              <span id="val-dev-con" class="readout">1.00</span>
+            </div>
+            <div class="range-row">
+              <label for="dev-blk">BLACKS</label>
+              <input id="dev-blk" type="range" min="-0.40" max="0.40" step="0.02" value="0.00">
+              <span id="val-dev-blk" class="readout">0.00</span>
+            </div>
+            <div class="range-row">
+              <label for="dev-temp">TEMP</label>
+              <input id="dev-temp" type="range" min="-1.0" max="1.0" step="0.02" value="0.00">
+              <span id="val-dev-temp" class="readout">0.00</span>
+            </div>
+            <div class="range-row">
+              <label for="dev-tint">TINT</label>
+              <input id="dev-tint" type="range" min="-1.0" max="1.0" step="0.02" value="0.00">
+              <span id="val-dev-tint" class="readout">0.00</span>
+            </div>
+            <div class="range-row">
+              <label for="dev-sat">SAT</label>
+              <input id="dev-sat" type="range" min="0.0" max="1.8" step="0.05" value="1.00">
+              <span id="val-dev-sat" class="readout">1.00</span>
+            </div>
+            <div class="range-row">
+              <label for="dev-cnr">CHROMA NR</label>
+              <input id="dev-cnr" type="range" min="0.0" max="1.0" step="0.05" value="0.55">
+              <span id="val-dev-cnr" class="readout">55%</span>
+            </div>
+            <div class="range-row">
+              <label for="dev-lnr">LUMA NR</label>
+              <input id="dev-lnr" type="range" min="0.0" max="1.0" step="0.05" value="0.15">
+              <span id="val-dev-lnr" class="readout">15%</span>
+            </div>
+            <div class="range-row">
+              <label for="dev-shp">SHARPEN</label>
+              <input id="dev-shp" type="range" min="0.0" max="1.0" step="0.05" value="0.25">
+              <span id="val-dev-shp" class="readout">25%</span>
+            </div>
+            <div class="row">
+              <button id="dev-apply-strip" class="grow" title="Copy current look to all frames on this strip">APPLY STRIP</button>
+              <button id="dev-apply-all" class="grow" title="Copy current look to all frames on this roll">APPLY ALL</button>
+            </div>
+            <div class="row">
+              <button id="dev-sample-base" class="grow" title="Re-sample orange film mask from inter-frame gaps">SAMPLE BASE</button>
+              <button id="dev-reset" class="danger" title="Reset frame develop settings to defaults">RESET</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <span class="tab">FRAME ORIENTATION &amp; STEP</span>
+          </div>
+          <div class="panel-body">
+            <div class="row">
+              <button id="dev-prev" class="grow">PREV <span class="key">P</span></button>
+              <button id="dev-next" class="grow">NEXT <span class="key">N</span></button>
+            </div>
+            <div class="row">
+              <button id="dev-rot-ccw" class="grow">OUT -90 <span class="key">Q</span></button>
+              <button id="dev-rot-cw" class="grow">OUT +90 <span class="key">W</span></button>
+            </div>
+          </div>
+        </section>
+      </div>
     </aside>
   </main>
 
   <!-- BOTTOM KEYBOARD HINT BAR -->
   <footer class="statusbar">
+    <span><span class="key">TAB</span> CROP/DEV</span>
     <span><span class="key">L</span> ROT VIEW</span>
     <span><span class="key">N/P</span> STEP FRAME</span>
-    <span><span class="key">Z</span> ZOOM SEL</span>
     <span><span class="key">Q/W</span> OUT 90</span>
-    <span><span class="key">SHIFT+ARROWS</span> STRIP</span>
-    <span><span class="key">[ / ]</span> TILT</span>
+    <span><span class="key">\</span> BEFORE/AFTER</span>
     <span><span class="key">I</span> POSITIVE</span>
     <span><span class="key">M</span> IR DUST</span>
-    <span><span class="key">B</span> DRAW</span>
-    <span><span class="key">DEL</span> REMOVE</span>
+    <span><span class="key">^Z/^Y</span> UNDO/REDO</span>
+    <span><span class="key">E</span> EXPORT</span>
     <span id="status-msg" class="right">STANDALONE · NO LLM REQUIRED</span>
   </footer>
 </div>

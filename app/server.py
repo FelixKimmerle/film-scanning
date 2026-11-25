@@ -216,10 +216,11 @@ class AppState:
                     line = f"[{time.strftime('%H:%M:%S')}] {msg}"
                     # Live progress ticks (same pass/phase prefix) update last log line in-place
                     # so the log box stays clean while transitions append new lines.
-                    prefix = msg.split("(", 1)[0].split("·", 2)
-                    cur_prefix = "·".join(prefix[:2]).strip() if (
-                        msg.startswith("PASS ") or msg.startswith("CALIBRATING") or msg.startswith("WRITING TIFF") or msg.startswith("VUESCAN ")
-                    ) else ""
+                    is_tick = any(tok in msg for tok in ("PASS ", "CALIBRATING", "WRITING TIFF", "VUESCAN "))
+                    if is_tick:
+                        cur_prefix = msg.split("~", 1)[0].split("(", 1)[0].strip()
+                    else:
+                        cur_prefix = ""
                     if cur_prefix and cur_prefix == last_prefix and self.job.logs:
                         self.job.logs[-1] = line
                     else:
@@ -457,6 +458,36 @@ class CockpitHandler(BaseHTTPRequestHandler):
                         lp.write_text(json.dumps(body, indent=2), encoding="utf-8")
                         self._send_json({"saved": True, "path": str(lp)})
                         return
+                    if action == "film_base":
+                        frames = body.get("frames", [])
+                        base = tiff_bridge.sample_film_base_from_frames(scan_path, frames)
+                        self._send_json({"ok": base is not None, "base": list(base) if base else None})
+                        return
+                    if action == "develop_preview":
+                        frame = body.get("frame")
+                        if not frame:
+                            raise ValueError("Missing frame")
+                        dev = body.get("develop") or {}
+                        base_raw = body.get("film_base")
+                        film_base = tuple(float(v) for v in base_raw[:3]) if (isinstance(base_raw, list) and len(base_raw) >= 3) else None
+                        film_type = INVERT_MODES.get(str(body.get("film_type", "color_neg")), 1)
+                        apply_ir = bool(body.get("apply_ir_clean", False))
+                        ir_sens = float(body.get("ir_sensitivity", 0.5))
+                        max_dim = min(1600, max(256, int(body.get("max_dim", 1050))))
+                        rgb8 = tiff_bridge.develop_frame_preview(
+                            scan_path,
+                            frame,
+                            dev=dev,
+                            film_base=film_base,
+                            max_dim=max_dim,
+                            apply_ir_clean=apply_ir,
+                            ir_sensitivity=ir_sens,
+                            film_type=film_type,
+                        )
+                        bio = io.BytesIO()
+                        Image.fromarray(rgb8, mode="RGB").save(bio, format="JPEG", quality=91)
+                        self._send_bytes(bio.getvalue(), "image/jpeg", cache="no-store")
+                        return
                     if action == "delete":
                         lp = SCANS_DIR / f"{scan_path.name}.layout.json"
                         scan_path.unlink(missing_ok=True)
@@ -478,22 +509,38 @@ class CockpitHandler(BaseHTTPRequestHandler):
                 apply_ir = bool(body.get("apply_ir_clean", True))
                 ir_sens = float(body.get("ir_sensitivity", 0.5))
                 gamma_22 = bool(body.get("gamma_22", False))
-                export_proof = bool(body.get("export_positive_proof", True))
                 film_type = str(body.get("film_type", "color_neg"))
                 pos_mode = INVERT_MODES.get(film_type, 1)
+                base_raw = body.get("film_base")
+                film_base = tuple(float(v) for v in base_raw[:3]) if (isinstance(base_raw, list) and len(base_raw) >= 3) else None
+
+                export_raw_tiff = bool(body.get("export_raw_tiff", True))
+                export_dev_tiff = bool(body.get("export_dev_tiff", False))
+                export_dev_jpg = bool(body.get("export_dev_jpg", body.get("export_positive_proof", True)))
+                jpg_max_dim = int(body.get("jpg_max_dim", 0))
+                camera = str(body.get("camera", ""))
+                film_stock = str(body.get("film_stock", ""))
+                if not (export_raw_tiff or export_dev_tiff or export_dev_jpg):
+                    raise ValueError("Enable at least one export format (RAW TIFF, DEV TIFF, or DEV JPG)")
 
                 target_sub = out_dir / ("".join(c if (c.isalnum() or c in "-_") else "_" for c in roll_name).strip("_") or "roll")
                 t0 = time.perf_counter()
-                exported = tiff_bridge.export_frames(
+                exported = tiff_bridge.export_frames_v2(
                     src_path=scan_path,
                     frames=frames,
                     out_dir=target_sub,
                     roll_name=roll_name,
+                    film_base=film_base,
                     apply_ir_clean=apply_ir,
                     ir_sensitivity=ir_sens,
                     gamma_22=gamma_22,
-                    export_positive_proof=export_proof,
-                    positive_mode=pos_mode,
+                    film_type=pos_mode,
+                    export_raw_tiff=export_raw_tiff,
+                    export_dev_tiff=export_dev_tiff,
+                    export_dev_jpg=export_dev_jpg,
+                    jpg_max_dim=jpg_max_dim,
+                    camera=camera,
+                    film_stock=film_stock,
                 )
                 elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 1)
                 self._send_json(

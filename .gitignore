@@ -6,6 +6,7 @@ silverfast-bin/
 silverfast-release/
 vuescan_home/
 .sf_staging/
+.sf_tiles/
 .vuescan_staging/
 
 # Film scans, layouts, and exported frames

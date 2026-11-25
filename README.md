@@ -92,6 +92,13 @@ sudo dnf install gcc-c++ libtiff-devel pkgconf-pkg-config python3 python3-numpy 
 
 ---
 
+## Documentation & Benchmarks
+
+- **[`docs/ENGINEERING_NOTES.md`](docs/ENGINEERING_NOTES.md):** Measured Epson V750 Pro holder geometry, 4.0 GiB classic TIFF auto-split & BigTIFF stitcher architecture, real 3200 DPI timings, 48-frame half-frame border analysis, sample exports, and 1:1 IR dust forensics (with embedded charts & visual comparisons).
+- **[`docs/V2_IMAGING_PLAN.md`](docs/V2_IMAGING_PLAN.md):** Architecture roadmap for V2 grain-matched IR cleaning, YCbCr chroma/luma denoising, rebate-sampled C-41 Color Lab profiles, and the 2-tab `[ CROP | DEVELOP ]` Glass Cockpit layout.
+
+---
+
 ## Project Layout
 
 ```text
@@ -101,6 +108,7 @@ film_scanning/
 │   ├── core/            # C++20 libfilm_core (film_core.cpp), ctypes bridge, frame detector
 │   ├── web/             # Glass Cockpit 60fps HTML5 canvas editor (zero npm/bundler)
 │   └── server.py        # Zero-dependency stdlib HTTP + SSE server
+├── docs/                # Engineering notes, V2 imaging plan, UI screenshot & forensic showcases
 ├── models/
 │   └── epson-perfection-v700-v750.json   # V700/V750 hardware model for silverfast-linux
 ├── nobcpp.cpp / nobcpp.hpp               # Self-rebuilding C++20 build system

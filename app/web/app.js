@@ -7,19 +7,43 @@
     half_frame: { wMm: 24.0, hMm: 17.6, pitchMm: 19.0, count: 12 },
     full_frame: { wMm: 24.0, hMm: 36.0, pitchMm: 38.0, count: 6 },
   };
+  const DEFAULT_DEVELOP = {
+    enabled: true,
+    profile: "frontier",
+    exposure: 0.0,
+    contrast: 1.0,
+    blacks: 0.0,
+    temp: 0.0,
+    tint: 0.0,
+    saturation: 1.0,
+    chroma_nr: 0.55,
+    luma_nr: 0.15,
+    sharpen: 0.25,
+    auto_wb: true,
+  };
 
   // ---------- Application State ----------
   const state = {
     scans: [],
     activeScan: null,       // scan metadata object
     strips: [],             // [{index, x0, x1, y0, y1, angle_deg, color}]
-    frames: [],             // [{id, strip_index, cx, cy, width, height, angle_deg, inset_pct}]
+    frames: [],             // [{id, strip_index, cx, cy, width, height, angle_deg, inset_pct, develop}]
     selectedId: null,
     activeStripIndex: 0,
     undoStack: [],
     redoStack: [],
     backends: {},
     lastCompletedJobId: null,
+    lastLogKey: "",
+
+    // Mode & Develop lab state
+    uiMode: "crop",         // "crop" | "develop"
+    filmBase: null,         // [r, g, b] linear 0..1 sampled from inter-frame gaps
+    devIrPrev: false,
+    devBefore: false,
+    wbPickMode: false,
+    devReqSeq: 0,
+    devTimer: null,
 
     // View controls
     invertPreview: false,
@@ -105,6 +129,7 @@
     if (state.undoStack.length > 100) state.undoStack.shift();
     state.redoStack = [];
     syncHistoryButtons();
+    scheduleAutoSave();
   }
   function applySnapshot(snap) {
     state.frames = JSON.parse(snap.framesJson);
@@ -117,6 +142,11 @@
     syncHistoryButtons();
     syncUI();
     render();
+    if (state.uiMode === "develop") {
+      syncDevelopUI();
+      scheduleDevelopPreview(40);
+    }
+    scheduleAutoSave();
   }
   function undo() {
     if (!state.undoStack.length) {
@@ -233,7 +263,12 @@
     state.selectedId = f.id;
     state.activeStripIndex = f.strip_index || 0;
     syncUI();
-    zoomToFrame(f);
+    if (state.uiMode === "develop") {
+      syncDevelopUI();
+      scheduleDevelopPreview(10);
+    } else {
+      zoomToFrame(f);
+    }
   }
 
   function rotateViewport(deltaDeg = 90) {
@@ -404,24 +439,40 @@
   }
 
   // ---------- Scan Selection & Detection ----------
-  async function refreshScans(selectName = null) {
+  function closeScan() {
+    flushAutoSave();
+    state.activeScan = null;
+    state.selectedId = null;
+    state.undoStack = [];
+    state.redoStack = [];
+    state.frames = [];
+    state.strips = [];
+    state.filmBase = null;
+    state.img = null;
+    state.maskImg = null;
+    state.hiResTile = null;
+    state.hiResMask = null;
+    $("scan-meta").textContent = "NO SCAN LOADED";
+    $("tog-irmask").disabled = true;
+    $("tog-irraw").disabled = true;
+    if (state.uiMode === "develop") setUiMode("crop");
+    syncHistoryButtons();
+    syncUI();
+    render();
+  }
+
+  async function refreshScans(selectName = null, autoOpen = false) {
     const data = await apiGet("/api/scans");
     state.scans = data.scans || [];
     const sel = $("scan-select");
-    const prevName = selectName || (state.activeScan && state.activeScan.name);
+    const curActive = state.activeScan && state.activeScan.name;
     sel.innerHTML = "";
-    if (!state.scans.length) {
-      const opt = document.createElement("option");
-      opt.value = "";
-      opt.textContent = "(NO SCANS YET)";
-      sel.appendChild(opt);
-      state.activeScan = null;
-      state.frames = [];
-      state.strips = [];
-      syncUI();
-      render();
-      return;
-    }
+
+    const blankOpt = document.createElement("option");
+    blankOpt.value = "";
+    blankOpt.textContent = state.scans.length ? "(SELECT SCAN...)" : "(NO SCANS YET)";
+    sel.appendChild(blankOpt);
+
     for (const s of state.scans) {
       const opt = document.createElement("option");
       opt.value = s.name;
@@ -429,18 +480,38 @@
       opt.textContent = `${s.name} (${s.dpi || "?"}dpi${irTag})`;
       sel.appendChild(opt);
     }
-    const target = state.scans.find((s) => s.name === prevName) || state.scans[0];
-    sel.value = target.name;
-    await openScan(target);
+
+    // Explicit open requested (e.g. user selected one)
+    if (autoOpen && selectName) {
+      const target = state.scans.find((s) => s.name === selectName);
+      if (target) {
+        sel.value = target.name;
+        await openScan(target);
+        return;
+      }
+    }
+
+    // Preserve currently active scan if it still exists; otherwise stay blank
+    if (curActive && state.scans.some((s) => s.name === curActive)) {
+      sel.value = curActive;
+    } else {
+      sel.value = "";
+      if (state.activeScan) closeScan();
+      else { syncUI(); render(); }
+    }
   }
 
   async function openScan(scan) {
+    if (state.activeScan && state.activeScan.name !== scan.name) {
+      flushAutoSave();
+    }
     state.activeScan = scan;
     state.selectedId = null;
     state.undoStack = [];
     state.redoStack = [];
     state.frames = [];
     state.strips = [];
+    state.filmBase = null;
     syncHistoryButtons();
 
     const mb = ((scan.size_bytes || 0) / (1024 * 1024)).toFixed(1);
@@ -455,10 +526,6 @@
       setToggle("tog-irraw", false);
     }
 
-    // Set roll name cleanly from scan stem
-    const stem = scan.name.replace(/\.(tif|tiff)$/i, "");
-    $("in-roll").value = stem;
-
     loadPreviewImages();
     fitViewport();
 
@@ -468,6 +535,9 @@
       if (layout && Array.isArray(layout.frames) && layout.frames.length) {
         state.strips = layout.strips || [];
         state.frames = layout.frames;
+        state.filmBase = Array.isArray(layout.film_base) ? layout.film_base : null;
+        if (typeof layout.camera === "string" && !$("in-camera").value) $("in-camera").value = layout.camera;
+        if (typeof layout.film_stock === "string" && !$("in-stock").value) $("in-stock").value = layout.film_stock;
         if (typeof layout.inset_pct === "number") {
           state.insetPct = layout.inset_pct;
           $("in-inset").value = String(state.insetPct);
@@ -475,6 +545,10 @@
         }
         syncUI();
         render();
+        if (state.uiMode === "develop") {
+          syncDevelopUI();
+          scheduleDevelopPreview(10);
+        }
         toast(`LOADED SAVED LAYOUT (${state.frames.length} FRAMES)`);
         return;
       }
@@ -496,6 +570,7 @@
       pushUndo();
       state.strips = res.strips || [];
       state.frames = res.frames || [];
+      state.filmBase = null;
       state.selectedId = state.frames.length ? state.frames[0].id : null;
       syncUI();
       render();
@@ -507,20 +582,68 @@
     }
   }
 
-  async function saveLayout(silent = false) {
+  let autoSaveTimer = null;
+  let autoSaveDirty = false;
+
+  function buildLayoutPayload() {
+    if (!state.activeScan) return null;
+    return {
+      scan_name: state.activeScan.name,
+      film_format: $("in-format").value,
+      film_type: $("in-filmtype").value,
+      inset_pct: state.insetPct,
+      film_base: state.filmBase,
+      camera: $("in-camera").value.trim(),
+      film_stock: $("in-stock").value.trim(),
+      strips: state.strips,
+      frames: state.frames,
+    };
+  }
+
+  function scheduleAutoSave() {
     if (!state.activeScan) return;
+    autoSaveDirty = true;
+    clearTimeout(autoSaveTimer);
+    setStatusMsg("UNSAVED CHANGES...");
+    const targetName = state.activeScan.name;
+    autoSaveTimer = setTimeout(async () => {
+      autoSaveTimer = null;
+      if (!state.activeScan || state.activeScan.name !== targetName) return;
+      await saveLayout(true, true);
+    }, 900);
+  }
+
+  function flushAutoSave() {
+    if (!autoSaveDirty || !state.activeScan) return;
+    clearTimeout(autoSaveTimer);
+    autoSaveTimer = null;
+    autoSaveDirty = false;
+    const payload = buildLayoutPayload();
+    if (!payload) return;
+    const url = `/api/scan/${encodeURIComponent(state.activeScan.name)}/layout`;
     try {
-      await apiPost(`/api/scan/${encodeURIComponent(state.activeScan.name)}/layout`, {
-        scan_name: state.activeScan.name,
-        film_format: $("in-format").value,
-        film_type: $("in-filmtype").value,
-        inset_pct: state.insetPct,
-        strips: state.strips,
-        frames: state.frames,
-      });
+      const blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
+      if (!navigator.sendBeacon || !navigator.sendBeacon(url, blob)) {
+        fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), keepalive: true }).catch(() => {});
+      }
+    } catch (_) { /* ignore */ }
+  }
+
+  window.addEventListener("pagehide", flushAutoSave);
+
+  async function saveLayout(silent = false, isAuto = false) {
+    const payload = buildLayoutPayload();
+    if (!payload) return;
+    clearTimeout(autoSaveTimer);
+    autoSaveTimer = null;
+    autoSaveDirty = false;
+    try {
+      await apiPost(`/api/scan/${encodeURIComponent(payload.scan_name)}/layout`, payload);
+      setStatusMsg(isAuto ? `AUTOSAVED (${state.frames.length} FRAMES)` : `SAVED (${state.frames.length} FRAMES)`);
       if (!silent) toast(`SAVED LAYOUT (${state.frames.length} FRAMES)`);
     } catch (err) {
-      toast(`SAVE ERR: ${err.message}`);
+      if (!silent) toast(`SAVE ERR: ${err.message}`);
+      setStatusMsg("SAVE ERROR");
     }
   }
 
@@ -588,6 +711,7 @@
     f.rot90 = (((f.rot90 || 0) + delta) % 360 + 360) % 360;
     syncUI();
     render();
+    if (state.uiMode === "develop") scheduleDevelopPreview(10);
     toast(`${f.id.toUpperCase()} EXPORT ORIENTATION: ${f.rot90} DEG`);
   }
 
@@ -1282,18 +1406,23 @@
     $("btn-cancel-scan").disabled = !running;
 
     if (job && Array.isArray(job.logs)) {
-      const logBox = $("scan-logs");
-      logBox.innerHTML = job.logs.map((line) => {
-        const cls = line.includes("ERR:") ? "log-err" : (line.includes("Saved ") ? "log-ok" : "");
-        return `<div class="${cls}">${escapeHtml(line)}</div>`;
-      }).join("");
-      logBox.scrollTop = logBox.scrollHeight;
+      const logKey = job.logs.join("\n");
+      if (logKey !== state.lastLogKey) {
+        state.lastLogKey = logKey;
+        const logBox = $("scan-logs");
+        const nearBottom = (logBox.scrollHeight - logBox.scrollTop - logBox.clientHeight) < 28;
+        logBox.innerHTML = job.logs.map((line) => {
+          const cls = line.includes("ERR:") ? "log-err" : (line.includes("Saved ") ? "log-ok" : "");
+          return `<div class="${cls}">${escapeHtml(line)}</div>`;
+        }).join("");
+        if (nearBottom) logBox.scrollTop = logBox.scrollHeight;
+      }
     }
 
     if (st === "done" && job.output_file && job.job_id !== state.lastCompletedJobId) {
       state.lastCompletedJobId = job.job_id;
-      toast(`SCAN COMPLETE: ${job.output_file}`);
-      refreshScans(job.output_file);
+      toast(`SCAN COMPLETE: ${job.output_file} — READY IN SCAN DROPDOWN`, 5000);
+      refreshScans(null, false);
     }
   }
 
@@ -1332,20 +1461,27 @@
     $("btn-export-top").disabled = true;
 
     try {
+      const fallbackStem = state.activeScan.name.replace(/\.(tif|tiff)$/i, "");
       const res = await apiPost("/api/export", {
         scan_name: state.activeScan.name,
         frames: state.frames,
         out_dir: $("in-outdir").value.trim(),
-        roll_name: $("in-roll").value.trim() || "roll",
+        roll_name: $("in-roll").value.trim() || fallbackStem || "roll",
         apply_ir_clean: getToggle("tog-exp-ir"),
         ir_sensitivity: state.irSens,
         gamma_22: getToggle("tog-exp-gamma"),
-        export_positive_proof: getToggle("tog-exp-proof"),
+        export_raw_tiff: getToggle("tog-exp-raw"),
+        export_dev_tiff: getToggle("tog-exp-dev-tiff"),
+        export_dev_jpg: getToggle("tog-exp-proof"),
+        jpg_max_dim: parseInt($("in-jpg-size").value, 10) || 0,
+        camera: $("in-camera").value.trim(),
+        film_stock: $("in-stock").value.trim(),
+        film_base: state.filmBase,
         film_type: $("in-filmtype").value,
       });
       outBox.className = "callout ok";
       outBox.querySelector(".tag").textContent = "OK";
-      outTxt.textContent = `WROTE ${res.count} 16-BIT TIFFS IN ${res.elapsed_ms} MS -> ${res.out_dir}`;
+      outTxt.textContent = `EXPORTED ${res.count} FRAMES IN ${res.elapsed_ms} MS -> ${res.out_dir}`;
       toast(`EXPORTED ${res.count} FRAMES IN ${res.elapsed_ms} MS`);
     } catch (err) {
       outBox.className = "callout err";
@@ -1367,12 +1503,310 @@
     });
   }
 
+  function syncDpiLabels() {
+    const irOn = getToggle("tog-ir");
+    const isSf = $("in-backend").value === "silverfast";
+    const sel = $("in-dpi");
+    for (const opt of sel.options) {
+      if (opt.value === "3000") opt.textContent = (isSf && irOn) ? "3000 DPI (MAX 1-PASS HDRi)" : "3000 DPI";
+      if (opt.value === "3200") opt.textContent = (isSf && irOn) ? "3200 DPI (AUTO-SPLIT 2x)" : "3200 DPI (1-PASS)";
+      if (opt.value === "4800") opt.textContent = isSf ? (irOn ? "4800 DPI (AUTO-SPLIT 4x)" : "4800 DPI (AUTO-SPLIT 2x)") : "4800 DPI";
+    }
+  }
+
   bindToggle("tog-me");
-  bindToggle("tog-ir");
+  bindToggle("tog-ir", syncDpiLabels);
   bindToggle("tog-exp-ir");
   bindToggle("tog-exp-gamma");
+  bindToggle("tog-exp-raw");
+  bindToggle("tog-exp-dev-tiff");
   bindToggle("tog-exp-proof");
   bindToggle("tog-skip-empty", (v) => { state.skipEmpty = v; });
+
+  // ---------- Film Lab Develop Mode Controller ----------
+  function ensureFrameDevelop(f) {
+    if (!f) return { ...DEFAULT_DEVELOP };
+    if (!f.develop || typeof f.develop !== "object") {
+      f.develop = { ...DEFAULT_DEVELOP };
+    } else {
+      f.develop = { ...DEFAULT_DEVELOP, ...f.develop };
+    }
+    return f.develop;
+  }
+
+  function updateBaseReadout() {
+    const el = $("dev-base-readout");
+    if (!el) return;
+    if (state.filmBase && state.filmBase.length === 3) {
+      const [r, g, b] = state.filmBase.map((v) => Math.round(v * 100));
+      el.textContent = `BASE ${r}/${g}/${b}`;
+    } else {
+      el.textContent = "BASE: AUTO";
+    }
+  }
+
+  async function sampleFilmBase(silent = false) {
+    if (!state.activeScan || state.frames.length < 2) return;
+    try {
+      const res = await apiPost(`/api/scan/${encodeURIComponent(state.activeScan.name)}/film_base`, {
+        frames: state.frames,
+      });
+      if (res.ok && Array.isArray(res.base)) {
+        state.filmBase = res.base;
+        updateBaseReadout();
+        scheduleAutoSave();
+        if (!silent) toast(`SAMPLED FILM BASE: ${res.base.map((v) => v.toFixed(2)).join(" / ")}`);
+        if (state.uiMode === "develop") scheduleDevelopPreview(20);
+      } else if (!silent) {
+        toast("COULD NOT SAMPLE INTER-FRAME REBATE");
+      }
+    } catch (err) {
+      if (!silent) toast(`BASE ERR: ${err.message}`);
+    }
+  }
+
+  function syncDevelopUI() {
+    const f = getSelectedFrame();
+    const d = ensureFrameDevelop(f);
+    $("dev-profile").value = d.profile || "frontier";
+    setToggle("dev-autowb", d.auto_wb !== false);
+    setToggle("dev-wb-pick", state.wbPickMode);
+    setToggle("dev-ir-prev", state.devIrPrev);
+    setToggle("dev-before", state.devBefore);
+
+    $("dev-exp").value = String(d.exposure);
+    $("val-dev-exp").textContent = (d.exposure >= 0 ? "+" : "") + Number(d.exposure).toFixed(2);
+    $("dev-con").value = String(d.contrast);
+    $("val-dev-con").textContent = Number(d.contrast).toFixed(2);
+    $("dev-blk").value = String(d.blacks);
+    $("val-dev-blk").textContent = (d.blacks >= 0 ? "+" : "") + Number(d.blacks).toFixed(2);
+    $("dev-temp").value = String(d.temp);
+    $("val-dev-temp").textContent = (d.temp >= 0 ? "+" : "") + Number(d.temp).toFixed(2);
+    $("dev-tint").value = String(d.tint);
+    $("val-dev-tint").textContent = (d.tint >= 0 ? "+" : "") + Number(d.tint).toFixed(2);
+    $("dev-sat").value = String(d.saturation);
+    $("val-dev-sat").textContent = Number(d.saturation).toFixed(2);
+    $("dev-cnr").value = String(d.chroma_nr);
+    $("val-dev-cnr").textContent = `${Math.round(d.chroma_nr * 100)}%`;
+    $("dev-lnr").value = String(d.luma_nr);
+    $("val-dev-lnr").textContent = `${Math.round(d.luma_nr * 100)}%`;
+    $("dev-shp").value = String(d.sharpen);
+    $("val-dev-shp").textContent = `${Math.round(d.sharpen * 100)}%`;
+
+    updateBaseReadout();
+    const idx = f ? state.frames.findIndex((x) => x.id === f.id) + 1 : 0;
+    $("dev-hud-frame").textContent = f ? `#${String(idx).padStart(2, "0")} / ${state.frames.length}` : "NONE";
+    $("dev-hud-prof").textContent = state.devBefore ? "BEFORE (LEGACY PROOF)" : String(d.profile || "frontier").toUpperCase();
+    $("dev-stage-wrap").classList.toggle("wb-pick", state.wbPickMode);
+  }
+
+  function setUiMode(mode) {
+    if (mode === "develop" && (!state.activeScan || !state.frames.length)) {
+      toast("LOAD A SCAN & DETECT FRAMES FIRST");
+      return;
+    }
+    state.uiMode = mode;
+    const isDev = mode === "develop";
+    $("tab-crop").setAttribute("aria-selected", isDev ? "false" : "true");
+    $("tab-develop").setAttribute("aria-selected", isDev ? "true" : "false");
+    $("pane-crop").hidden = isDev;
+    $("pane-develop").hidden = !isDev;
+    $("dev-stage-wrap").hidden = !isDev;
+    if (!isDev) {
+      state.wbPickMode = false;
+      state.devBefore = false;
+      render();
+      return;
+    }
+    if (!getSelectedFrame() && state.frames.length) {
+      state.selectedId = state.frames[0].id;
+      syncUI();
+    }
+    syncDevelopUI();
+    if (!state.filmBase && $("in-filmtype").value !== "slide") {
+      sampleFilmBase(true);
+    }
+    scheduleDevelopPreview(10);
+  }
+
+  function scheduleDevelopPreview(delayMs = 70) {
+    if (state.uiMode !== "develop" || !state.activeScan) return;
+    clearTimeout(state.devTimer);
+    state.devTimer = setTimeout(fetchDevelopPreview, delayMs);
+  }
+
+  async function fetchDevelopPreview() {
+    const f = getSelectedFrame();
+    if (!state.activeScan || !f || state.uiMode !== "develop") return;
+    const seq = ++state.devReqSeq;
+    const d = ensureFrameDevelop(f);
+    const devPayload = state.devBefore ? { ...d, enabled: false } : { ...d, enabled: true };
+    $("dev-hud-state").textContent = "RENDERING...";
+    const t0 = performance.now();
+    try {
+      const res = await fetch(`/api/scan/${encodeURIComponent(state.activeScan.name)}/develop_preview`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          frame: f,
+          develop: devPayload,
+          film_base: state.filmBase,
+          film_type: $("in-filmtype").value,
+          apply_ir_clean: state.devIrPrev && !state.devBefore,
+          ir_sensitivity: state.irSens,
+          max_dim: 1050,
+        }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      if (seq !== state.devReqSeq) return;
+      const url = URL.createObjectURL(blob);
+      const im = new Image();
+      im.onload = () => {
+        URL.revokeObjectURL(url);
+        if (seq !== state.devReqSeq) return;
+        const dc = $("dev-canvas");
+        dc.width = im.naturalWidth;
+        dc.height = im.naturalHeight;
+        dc.getContext("2d").drawImage(im, 0, 0);
+        const dt = Math.round(performance.now() - t0);
+        $("dev-hud-state").textContent = `${im.naturalWidth}x${im.naturalHeight} · ${dt} ms`;
+      };
+      im.src = url;
+    } catch (err) {
+      if (seq === state.devReqSeq) {
+        $("dev-hud-state").textContent = `ERR: ${err.message}`;
+      }
+    }
+  }
+
+  $("tab-crop").addEventListener("click", () => setUiMode("crop"));
+  $("tab-develop").addEventListener("click", () => setUiMode("develop"));
+  $("dev-prev").addEventListener("click", () => stepFrame(-1));
+  $("dev-next").addEventListener("click", () => stepFrame(1));
+  $("dev-rot-ccw").addEventListener("click", () => rotateSelectedExport90(-90));
+  $("dev-rot-cw").addEventListener("click", () => rotateSelectedExport90(90));
+  $("dev-sample-base").addEventListener("click", () => sampleFilmBase(false));
+
+  $("dev-profile").addEventListener("change", () => {
+    const f = getSelectedFrame();
+    if (!f) return;
+    pushUndo();
+    ensureFrameDevelop(f).profile = $("dev-profile").value;
+    syncDevelopUI();
+    scheduleDevelopPreview(10);
+  });
+
+  bindToggle("dev-autowb", (v) => {
+    const f = getSelectedFrame();
+    if (!f) return;
+    pushUndo();
+    ensureFrameDevelop(f).auto_wb = v;
+    syncDevelopUI();
+    scheduleDevelopPreview(10);
+  });
+  bindToggle("dev-wb-pick", (v) => {
+    state.wbPickMode = v;
+    $("dev-stage-wrap").classList.toggle("wb-pick", v);
+    if (v) toast("CLICK A NEUTRAL GRAY AREA IN THE PREVIEW TO BALANCE WB");
+  });
+  bindToggle("dev-ir-prev", (v) => {
+    state.devIrPrev = v;
+    scheduleDevelopPreview(10);
+  });
+  bindToggle("dev-before", (v) => {
+    state.devBefore = v;
+    syncDevelopUI();
+    scheduleDevelopPreview(10);
+  });
+
+  // WB Eyedropper click on live developed canvas
+  $("dev-canvas").addEventListener("click", (e) => {
+    if (!state.wbPickMode || state.uiMode !== "develop") return;
+    const f = getSelectedFrame();
+    if (!f) return;
+    const dc = $("dev-canvas");
+    const rect = dc.getBoundingClientRect();
+    const px = Math.max(2, Math.min(dc.width - 3, Math.round(((e.clientX - rect.left) / rect.width) * dc.width)));
+    const py = Math.max(2, Math.min(dc.height - 3, Math.round(((e.clientY - rect.top) / rect.height) * dc.height)));
+    // Average a 5x5 patch so grain doesn't jitter the WB sample
+    const data = dc.getContext("2d").getImageData(px - 2, py - 2, 5, 5).data;
+    let sr = 0, sg = 0, sb = 0, cnt = 0;
+    for (let i = 0; i < data.length; i += 4) { sr += data[i]; sg += data[i + 1]; sb += data[i + 2]; cnt++; }
+    const r = sr / (cnt * 255), g = sg / (cnt * 255), b = sb / (cnt * 255);
+    const mean = (r + g + b) / 3;
+    if (mean < 0.03 || mean > 0.97) {
+      toast("PICK A MIDTONE GRAY (NOT PURE BLACK/WHITE)");
+      return;
+    }
+    pushUndo();
+    const d = ensureFrameDevelop(f);
+    // Nudge Temp (R-B) and Tint (G vs R/B) to neutralize the clicked gray sample
+    d.temp = Math.max(-1.0, Math.min(1.0, round3(d.temp + (b - r) * 1.6)));
+    d.tint = Math.max(-1.0, Math.min(1.0, round3(d.tint + (g - 0.5 * (r + b)) * 1.8)));
+    state.wbPickMode = false;
+    syncDevelopUI();
+    scheduleDevelopPreview(10);
+    toast(`WB BALANCED (TEMP ${d.temp.toFixed(2)}, TINT ${d.tint.toFixed(2)})`);
+  });
+
+  // Wire all 9 Film Lab sliders with single-step Undo on drag end + live ~70ms preview
+  const DEV_SLIDERS = [
+    ["dev-exp", "exposure"],
+    ["dev-con", "contrast"],
+    ["dev-blk", "blacks"],
+    ["dev-temp", "temp"],
+    ["dev-tint", "tint"],
+    ["dev-sat", "saturation"],
+    ["dev-cnr", "chroma_nr"],
+    ["dev-lnr", "luma_nr"],
+    ["dev-shp", "sharpen"],
+  ];
+  for (const [elId, prop] of DEV_SLIDERS) {
+    let beforeSnap = null;
+    const el = $(elId);
+    el.addEventListener("pointerdown", () => { beforeSnap = captureSnapshot(); });
+    el.addEventListener("focus", () => { if (!beforeSnap) beforeSnap = captureSnapshot(); });
+    el.addEventListener("input", () => {
+      const f = getSelectedFrame();
+      if (!f) return;
+      ensureFrameDevelop(f)[prop] = parseFloat(el.value);
+      syncDevelopUI();
+      scheduleDevelopPreview(75);
+    });
+    el.addEventListener("change", () => {
+      if (beforeSnap) {
+        pushUndo(beforeSnap);
+        beforeSnap = null;
+      }
+    });
+  }
+
+  function applyDevelopToScope(scope) {
+    const src = getSelectedFrame();
+    if (!src) return;
+    const dCopy = { ...ensureFrameDevelop(src) };
+    pushUndo();
+    let cnt = 0;
+    for (const f of state.frames) {
+      if (scope === "all" || f.strip_index === src.strip_index) {
+        f.develop = { ...dCopy };
+        cnt++;
+      }
+    }
+    toast(`APPLIED LOOK TO ${cnt} FRAMES (${scope.toUpperCase()})`);
+  }
+  $("dev-apply-strip").addEventListener("click", () => applyDevelopToScope("strip"));
+  $("dev-apply-all").addEventListener("click", () => applyDevelopToScope("all"));
+  $("dev-reset").addEventListener("click", () => {
+    const f = getSelectedFrame();
+    if (!f) return;
+    pushUndo();
+    f.develop = { ...DEFAULT_DEVELOP };
+    syncDevelopUI();
+    scheduleDevelopPreview(10);
+    toast("RESET FRAME DEVELOP SETTINGS");
+  });
 
   bindToggle("tog-invert", (v) => {
     state.invertPreview = v;
@@ -1396,6 +1830,7 @@
   $("in-backend").addEventListener("change", () => {
     const info = state.backends[$("in-backend").value];
     $("backend-note").textContent = info ? info.note : "";
+    syncDpiLabels();
   });
 
   $("in-filmtype").addEventListener("change", () => {
@@ -1408,8 +1843,10 @@
       setToggle("tog-ir", true);
       setToggle("tog-exp-ir", true);
     }
+    syncDpiLabels();
     if (state.invertPreview) loadPreviewImages();
   });
+  syncDpiLabels();
 
   let insetBeforeSnap = null;
   $("in-inset").addEventListener("pointerdown", () => { insetBeforeSnap = captureSnapshot(); });
@@ -1439,6 +1876,10 @@
   });
 
   $("scan-select").addEventListener("change", (e) => {
+    if (!e.target.value) {
+      closeScan();
+      return;
+    }
     const found = state.scans.find((s) => s.name === e.target.value);
     if (found) openScan(found);
   });
@@ -1559,6 +2000,17 @@
     if (e.code === "Space") { state.spaceDown = true; vpWrap.classList.add("panning"); e.preventDefault(); return; }
 
     const key = e.key.toLowerCase();
+    if (e.key === "Tab") {
+      e.preventDefault();
+      setUiMode(state.uiMode === "crop" ? "develop" : "crop");
+      return;
+    }
+    if (e.key === "\\" && state.uiMode === "develop" && !e.repeat) {
+      state.devBefore = true;
+      syncDevelopUI();
+      scheduleDevelopPreview(5);
+      return;
+    }
     if ((e.ctrlKey || e.metaKey) && key === "z" && e.shiftKey) { e.preventDefault(); redo(); return; }
     if ((e.ctrlKey || e.metaKey) && key === "y") { e.preventDefault(); redo(); return; }
     if ((e.ctrlKey || e.metaKey) && key === "z") { e.preventDefault(); undo(); return; }
@@ -1599,12 +2051,90 @@
 
   window.addEventListener("keyup", (e) => {
     if (e.code === "Space") { state.spaceDown = false; vpWrap.classList.remove("panning"); }
+    if (e.key === "\\" && state.uiMode === "develop" && state.devBefore) {
+      state.devBefore = false;
+      syncDevelopUI();
+      scheduleDevelopPreview(5);
+    }
   });
 
   window.addEventListener("resize", () => render());
 
+  // ---------- ImGui-Style Resizable Dock Splitters ----------
+  function initSplitters() {
+    const ws = document.querySelector(".workspace");
+    if (!ws) return;
+    const DEF_L = 340;
+    const DEF_R = 270;
+
+    function applyWidths(lw, rw) {
+      ws.style.setProperty("--left-w", `${Math.round(lw)}px`);
+      ws.style.setProperty("--right-w", `${Math.round(rw)}px`);
+      render();
+    }
+
+    let leftW = parseInt(localStorage.getItem("fc_left_w") || String(DEF_L), 10) || DEF_L;
+    let rightW = parseInt(localStorage.getItem("fc_right_w") || String(DEF_R), 10) || DEF_R;
+    leftW = Math.min(720, Math.max(200, leftW));
+    rightW = Math.min(580, Math.max(200, rightW));
+    applyWidths(leftW, rightW);
+
+    function wireSplitter(el, side) {
+      if (!el) return;
+      let dragging = false;
+      let startX = 0;
+      let origW = 0;
+
+      el.addEventListener("pointerdown", (e) => {
+        if (e.button !== 0) return;
+        dragging = true;
+        startX = e.clientX;
+        origW = side === "left" ? leftW : rightW;
+        el.classList.add("dragging");
+        el.setPointerCapture(e.pointerId);
+        e.preventDefault();
+      });
+
+      el.addEventListener("pointermove", (e) => {
+        if (!dragging) return;
+        const dx = e.clientX - startX;
+        const maxW = Math.max(360, Math.floor(ws.getBoundingClientRect().width * 0.48));
+        if (side === "left") {
+          leftW = Math.min(maxW, Math.max(200, origW + dx));
+        } else {
+          rightW = Math.min(maxW, Math.max(200, origW - dx));
+        }
+        applyWidths(leftW, rightW);
+      });
+
+      const endDrag = () => {
+        if (!dragging) return;
+        dragging = false;
+        el.classList.remove("dragging");
+        localStorage.setItem("fc_left_w", String(Math.round(leftW)));
+        localStorage.setItem("fc_right_w", String(Math.round(rightW)));
+        scheduleHiResTile();
+      };
+      el.addEventListener("pointerup", endDrag);
+      el.addEventListener("pointercancel", endDrag);
+
+      el.addEventListener("dblclick", () => {
+        if (side === "left") leftW = DEF_L;
+        else rightW = DEF_R;
+        applyWidths(leftW, rightW);
+        localStorage.setItem("fc_left_w", String(leftW));
+        localStorage.setItem("fc_right_w", String(rightW));
+        scheduleHiResTile();
+      });
+    }
+
+    wireSplitter($("split-left"), "left");
+    wireSplitter($("split-right"), "right");
+  }
+
   // ---------- Boot ----------
   async function boot() {
+    initSplitters();
     try {
       const st = await apiGet("/api/status");
       state.backends = st.backends || {};
@@ -1612,7 +2142,7 @@
       const bInfo = state.backends[$("in-backend").value];
       $("backend-note").textContent = bInfo ? bInfo.note : "";
       updateJobUI(st.job, st.scanner);
-      await refreshScans();
+      await refreshScans(null, false);
       connectSSE();
     } catch (err) {
       toast(`INIT ERR: ${err.message}`);

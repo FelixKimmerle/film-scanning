@@ -55,6 +55,35 @@ class _CFrameSpec(ctypes.Structure):
     ]
 
 
+class _CDevelopParams(ctypes.Structure):
+    _fields_ = [
+        ("enabled", ctypes.c_int),
+        ("profile", ctypes.c_int),
+        ("base_r", ctypes.c_float),
+        ("base_g", ctypes.c_float),
+        ("base_b", ctypes.c_float),
+        ("exposure", ctypes.c_float),
+        ("contrast", ctypes.c_float),
+        ("blacks", ctypes.c_float),
+        ("temp", ctypes.c_float),
+        ("tint", ctypes.c_float),
+        ("saturation", ctypes.c_float),
+        ("chroma_nr", ctypes.c_float),
+        ("luma_nr", ctypes.c_float),
+        ("sharpen", ctypes.c_float),
+        ("auto_wb", ctypes.c_int),
+    ]
+
+
+PROFILE_MAP = {
+    "natural": 0,
+    "frontier": 1,
+    "noritsu": 2,
+    "warm": 3,
+    "bw_classic": 4,
+}
+
+
 @dataclass
 class ScanInfo:
     path: str
@@ -117,6 +146,50 @@ _lib.fc_export_frames.argtypes = [
     ctypes.c_int,
 ]
 _lib.fc_export_frames.restype = ctypes.c_int
+
+_lib.fc_stitch_horizontal_bigtiff.argtypes = [
+    ctypes.c_int,
+    ctypes.POINTER(ctypes.c_char_p),
+    ctypes.c_char_p,
+]
+_lib.fc_stitch_horizontal_bigtiff.restype = ctypes.c_int
+
+_lib.fc_sample_film_base.argtypes = [
+    ctypes.c_char_p,
+    ctypes.c_int,
+    ctypes.POINTER(ctypes.c_int),
+    ctypes.POINTER(ctypes.c_float),
+]
+_lib.fc_sample_film_base.restype = ctypes.c_int
+
+_lib.fc_develop_frame_preview.argtypes = [
+    ctypes.c_char_p,
+    ctypes.POINTER(_CFrameSpec),
+    ctypes.POINTER(_CDevelopParams),
+    ctypes.c_int,
+    ctypes.c_int,
+    ctypes.c_float,
+    ctypes.c_int,
+    ctypes.POINTER(ctypes.c_int),
+    ctypes.POINTER(ctypes.c_int),
+    ctypes.POINTER(ctypes.c_uint8),
+]
+_lib.fc_develop_frame_preview.restype = ctypes.c_int
+
+_lib.fc_export_frames_v2.argtypes = [
+    ctypes.c_char_p,
+    ctypes.c_int,
+    ctypes.POINTER(_CFrameSpec),
+    ctypes.POINTER(_CDevelopParams),
+    ctypes.POINTER(ctypes.c_char_p),
+    ctypes.POINTER(ctypes.c_char_p),
+    ctypes.POINTER(ctypes.c_char_p),
+    ctypes.c_int,
+    ctypes.c_float,
+    ctypes.c_int,
+    ctypes.c_int,
+]
+_lib.fc_export_frames_v2.restype = ctypes.c_int
 
 
 def read_info(path: str | Path) -> ScanInfo:
@@ -331,6 +404,273 @@ def export_frames(
                 "tiff_path": str(tpath),
                 "size_bytes": tpath.stat().st_size if tpath.exists() else 0,
                 "proof_jpg": proof_jpg,
+            }
+        )
+    return results
+
+
+def stitch_horizontal_bigtiff(tile_paths: list[str | Path], out_path: str | Path) -> Path:
+    """Stitch horizontal RGB16(+IR16) TIFF tiles side-by-side into one 64-bit BigTIFF."""
+    if not tile_paths:
+        raise ValueError("tile_paths must not be empty")
+    n = len(tile_paths)
+    c_tiles = (ctypes.c_char_p * n)(*[str(p).encode("utf-8") for p in tile_paths])
+    out_p = Path(out_path)
+    out_p.parent.mkdir(parents=True, exist_ok=True)
+    rc = _lib.fc_stitch_horizontal_bigtiff(ctypes.c_int(n), c_tiles, str(out_p).encode("utf-8"))
+    if rc != 0:
+        raise RuntimeError(f"fc_stitch_horizontal_bigtiff failed (rc={rc})")
+    return out_p
+
+
+def _frame_to_cspec(f: dict) -> _CFrameSpec:
+    rot90 = int(f.get("rot90", 0)) % 360
+    fw = float(f["width"])
+    fh = float(f["height"])
+    ang = float(f.get("angle_deg", 0.0))
+    if rot90 == 90:
+        fw, fh, ang = fh, fw, ang - 90.0
+    elif rot90 == 180:
+        ang = ang + 180.0
+    elif rot90 == 270:
+        fw, fh, ang = fh, fw, ang + 90.0
+    return _CFrameSpec(
+        cx=float(f["cx"]),
+        cy=float(f["cy"]),
+        width=fw,
+        height=fh,
+        angle_deg=ang,
+        inset_pct=float(f.get("inset_pct", 0.0)),
+    )
+
+
+def _dev_to_cparams(dev: dict | None, film_base: tuple[float, float, float] | None = None) -> _CDevelopParams:
+    d = dev or {}
+    prof_raw = d.get("profile", "frontier")
+    prof_id = PROFILE_MAP.get(str(prof_raw).lower(), int(prof_raw) if isinstance(prof_raw, int) else 1)
+    br = float(d.get("base_r", film_base[0] if film_base else 0.0))
+    bg = float(d.get("base_g", film_base[1] if film_base else 0.0))
+    bb = float(d.get("base_b", film_base[2] if film_base else 0.0))
+    return _CDevelopParams(
+        enabled=1 if d.get("enabled", True) else 0,
+        profile=prof_id,
+        base_r=br,
+        base_g=bg,
+        base_b=bb,
+        exposure=float(d.get("exposure", 0.0)),
+        contrast=float(d.get("contrast", 1.0)),
+        blacks=float(d.get("blacks", 0.0)),
+        temp=float(d.get("temp", 0.0)),
+        tint=float(d.get("tint", 0.0)),
+        saturation=float(d.get("saturation", 1.0)),
+        chroma_nr=float(d.get("chroma_nr", 0.55)),
+        luma_nr=float(d.get("luma_nr", 0.15)),
+        sharpen=float(d.get("sharpen", 0.25)),
+        auto_wb=1 if d.get("auto_wb", True) else 0,
+    )
+
+
+def sample_film_base_from_frames(src_path: str | Path, frames: list[dict]) -> tuple[float, float, float] | None:
+    """Sample true unexposed orange film base (D-min) directly from inter-frame gaps."""
+    if len(frames) < 2:
+        return None
+    by_strip: dict[int, list[dict]] = {}
+    for f in frames:
+        by_strip.setdefault(int(f.get("strip_index", 0)), []).append(f)
+
+    boxes: list[int] = []
+    for s_frames in by_strip.values():
+        s_frames.sort(key=lambda x: float(x["cy"]))
+        for a, b in zip(s_frames, s_frames[1:]):
+            y_top = float(a["cy"]) + float(a["height"]) * 0.5
+            y_bot = float(b["cy"]) - float(b["height"]) * 0.5
+            gap = y_bot - y_top
+            if gap < 6.0 or gap > float(a["height"]) * 0.35:
+                continue
+            mid_y = 0.5 * (y_top + y_bot)
+            gh = max(2, int(round(gap * 0.45)))
+            gw = max(12, int(round(min(float(a["width"]), float(b["width"])) * 0.55)))
+            gx = int(round(0.5 * (float(a["cx"]) + float(b["cx"])) - gw * 0.5))
+            gy = int(round(mid_y - gh * 0.5))
+            boxes.extend([gx, gy, gw, gh])
+
+    if not boxes:
+        return None
+    n_boxes = len(boxes) // 4
+    c_boxes = (ctypes.c_int * len(boxes))(*boxes)
+    out_rgb = (ctypes.c_float * 3)()
+    rc = _lib.fc_sample_film_base(str(src_path).encode("utf-8"), ctypes.c_int(n_boxes), c_boxes, out_rgb)
+    if rc != 0:
+        return None
+    return (float(out_rgb[0]), float(out_rgb[1]), float(out_rgb[2]))
+
+
+def develop_frame_preview(
+    src_path: str | Path,
+    frame: dict,
+    dev: dict | None = None,
+    film_base: tuple[float, float, float] | None = None,
+    max_dim: int = 1100,
+    apply_ir_clean: bool = True,
+    ir_sensitivity: float = 0.5,
+    film_type: int = 1,
+) -> np.ndarray:
+    """Fast random-access live preview of one developed frame (returns RGB8 ndarray)."""
+    cspec = _frame_to_cspec(frame)
+    cdev = _dev_to_cparams(dev, film_base)
+    alloc_w = max_dim if max_dim > 0 else int(max(cspec.width, cspec.height) + 16)
+    buf = np.empty((alloc_w * alloc_w * 3,), dtype=np.uint8)
+    ow = ctypes.c_int(0)
+    oh = ctypes.c_int(0)
+    rc = _lib.fc_develop_frame_preview(
+        str(src_path).encode("utf-8"),
+        ctypes.byref(cspec),
+        ctypes.byref(cdev),
+        ctypes.c_int(max_dim),
+        ctypes.c_int(1 if apply_ir_clean else 0),
+        ctypes.c_float(ir_sensitivity),
+        ctypes.c_int(film_type),
+        ctypes.byref(ow),
+        ctypes.byref(oh),
+        buf.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+    )
+    if rc != 0:
+        raise RuntimeError(f"fc_develop_frame_preview failed (rc={rc})")
+    w, h = int(ow.value), int(oh.value)
+    return buf[: w * h * 3].reshape((h, w, 3)).copy()
+
+
+def _build_exif_bytes(camera: str, film_stock: str) -> bytes | None:
+    if not camera and not film_stock:
+        return None
+    exif = Image.Exif()
+    if camera:
+        exif[0x0110] = camera  # Model
+    exif[0x0131] = "Film Cockpit V2 (Epson Perfection V750 Pro)"  # Software
+    if film_stock:
+        exif[0x010E] = f"Film: {film_stock} | Scanner: Epson Perfection V750 Pro"  # ImageDescription
+    return exif.tobytes()
+
+
+def export_frames_v2(
+    src_path: str | Path,
+    frames: list[dict],
+    out_dir: str | Path,
+    roll_name: str,
+    *,
+    film_base: tuple[float, float, float] | None = None,
+    apply_ir_clean: bool = True,
+    ir_sensitivity: float = 0.5,
+    gamma_22: bool = False,
+    film_type: int = 1,
+    export_raw_tiff: bool = True,
+    export_dev_tiff: bool = False,
+    export_dev_jpg: bool = True,
+    jpg_max_dim: int = 0,  # 0 = full native res, e.g. 2048 or 2400 for clean Lanczos-3 web/share
+    camera: str = "",
+    film_stock: str = "",
+) -> list[dict]:
+    """V2 batch exporter: supports 16-bit RAW TIFF, 16-bit Developed TIFF, and Developed JPEG (+EXIF)."""
+    if not frames:
+        return []
+    out_path = Path(out_dir).expanduser().resolve()
+    out_path.mkdir(parents=True, exist_ok=True)
+
+    raw_dir = out_path / "raw_16bit" if (export_raw_tiff and (export_dev_tiff or export_dev_jpg)) else out_path
+    dev_tiff_dir = out_path / "developed_16bit" if export_dev_tiff else out_path
+    jpg_dir = out_path / "developed_jpg" if export_dev_jpg else out_path
+    if export_raw_tiff:
+        raw_dir.mkdir(parents=True, exist_ok=True)
+    if export_dev_tiff:
+        dev_tiff_dir.mkdir(parents=True, exist_ok=True)
+    if export_dev_jpg:
+        jpg_dir.mkdir(parents=True, exist_ok=True)
+
+    safe_roll = "".join(c if (c.isalnum() or c in "-_") else "_" for c in (roll_name or "roll")).strip("_") or "roll"
+    if film_base is None and film_type != 3:
+        film_base = sample_film_base_from_frames(src_path, frames)
+
+    n = len(frames)
+    c_frames = (_CFrameSpec * n)()
+    c_devs = (_CDevelopParams * n)()
+    c_raw = (ctypes.c_char_p * n)()
+    c_dev = (ctypes.c_char_p * n)()
+    c_ppm = (ctypes.c_char_p * n)()
+
+    raw_paths: list[Path | None] = []
+    dev_paths: list[Path | None] = []
+    ppm_paths: list[Path | None] = []
+
+    for i, f in enumerate(frames):
+        idx = i + 1
+        c_frames[i] = _frame_to_cspec(f)
+        c_devs[i] = _dev_to_cparams(f.get("develop"), film_base)
+
+        if export_raw_tiff:
+            rp = raw_dir / f"{safe_roll}_{idx:03d}_raw.tif" if raw_dir != out_path else out_path / f"{safe_roll}_{idx:03d}.tif"
+            raw_paths.append(rp)
+            c_raw[i] = str(rp).encode("utf-8")
+        else:
+            raw_paths.append(None)
+            c_raw[i] = b""
+
+        if export_dev_tiff:
+            dp = dev_tiff_dir / f"{safe_roll}_{idx:03d}.tif"
+            dev_paths.append(dp)
+            c_dev[i] = str(dp).encode("utf-8")
+        else:
+            dev_paths.append(None)
+            c_dev[i] = b""
+
+        if export_dev_jpg:
+            pp = jpg_dir / f".tmp_{safe_roll}_{idx:03d}.ppm"
+            ppm_paths.append(pp)
+            c_ppm[i] = str(pp).encode("utf-8")
+        else:
+            ppm_paths.append(None)
+            c_ppm[i] = b""
+
+    rc = _lib.fc_export_frames_v2(
+        str(src_path).encode("utf-8"),
+        ctypes.c_int(n),
+        c_frames,
+        c_devs,
+        c_raw,
+        c_dev,
+        c_ppm,
+        ctypes.c_int(1 if apply_ir_clean else 0),
+        ctypes.c_float(ir_sensitivity),
+        ctypes.c_int(1 if gamma_22 else 0),
+        ctypes.c_int(film_type),
+    )
+    if rc != 0:
+        raise RuntimeError(f"fc_export_frames_v2 failed (rc={rc})")
+
+    exif_bytes = _build_exif_bytes(camera.strip(), film_stock.strip())
+    results = []
+    for i in range(n):
+        jpg_out = None
+        pp = ppm_paths[i]
+        if pp and pp.exists():
+            jp = jpg_dir / f"{safe_roll}_{i + 1:03d}.jpg"
+            with Image.open(pp) as pim:
+                if jpg_max_dim > 0 and max(pim.size) > jpg_max_dim:
+                    pim.thumbnail((jpg_max_dim, jpg_max_dim), Image.Resampling.LANCZOS)
+                save_kw = {"format": "JPEG", "quality": 93, "subsampling": 0}
+                if exif_bytes:
+                    save_kw["exif"] = exif_bytes
+                pim.save(jp, **save_kw)
+            os.remove(pp)
+            jpg_out = str(jp)
+
+        rp = raw_paths[i]
+        dp = dev_paths[i]
+        results.append(
+            {
+                "index": i + 1,
+                "raw_tiff": str(rp) if rp else None,
+                "dev_tiff": str(dp) if dp else None,
+                "dev_jpg": jpg_out,
             }
         )
     return results
